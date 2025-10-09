@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(vercel deploy:*)",
+      "Bash(vercel env:*)",
+      "Bash(vercel logs:*)",
+      "Bash(curl -s https://ecommerce-chatbot-fuqcqldpf-reatureds-projects.vercel.app/)",
+      "Bash(vercel project:*)",
+      "Bash(curl -s https://ecommerce-chatbot-api.vercel.app/)",
+      "Bash(vercel inspect:*)",
+      "Bash(pip3 install:*)",
+      "Bash(uvicorn:*)",
+      "Bash(curl -s http://127.0.0.1:8000/)",
+      "Bash(curl:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
