@@ -1,7 +1,8 @@
 import os
 import json
+import base64
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -45,7 +46,8 @@ async def root():
         "message": "E-commerce Chatbot API is running",
         "endpoints": {
             "perplexity_search": "/api/chat/perplexity/stream",
-            "anthropic_chat": "/api/chat/anthropic/stream"
+            "anthropic_chat": "/api/chat/anthropic/stream",
+            "anthropic_chat_upload": "/api/chat/anthropic/stream/upload"
         }
     }
 
@@ -159,6 +161,98 @@ async def anthropic_chat_stream(request: AnthropicChatRequest):
                 with client.messages.stream(
                     model=request.model,
                     max_tokens=request.max_tokens,
+                    messages=[{
+                        "role": "user",
+                        "content": content
+                    }]
+                ) as stream:
+                    for text in stream.text_stream:
+                        chunk_data = {
+                            "type": "content",
+                            "text": text
+                        }
+                        yield f"data: {json.dumps(chunk_data)}\n\n"
+
+                # Send completion message
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+            except Exception as e:
+                error_data = {"type": "error", "message": str(e)}
+                yield f"data: {json.dumps(error_data)}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Anthropic Chat with File Upload (for easier testing in /docs)
+@app.post("/api/chat/anthropic/stream/upload")
+async def anthropic_chat_stream_upload(
+    message: str = Form(...),
+    image: Optional[UploadFile] = File(None),
+    model: Optional[str] = Form("claude-3-5-sonnet-20241022"),
+    max_tokens: Optional[int] = Form(1024)
+):
+    """
+    Stream chat responses from Anthropic API with file upload support.
+    This endpoint is optimized for testing in FastAPI /docs UI.
+    """
+    try:
+        async def generate():
+            try:
+                from anthropic import Anthropic
+
+                api_key = os.getenv("ANTHROPIC_API_KEY")
+                if not api_key:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'ANTHROPIC_API_KEY not configured'})}\n\n"
+                    return
+
+                client = Anthropic(api_key=api_key)
+
+                # Prepare message content
+                content = []
+
+                # Add image if uploaded
+                if image:
+                    # Read file and convert to base64
+                    image_data = await image.read()
+                    base64_image = base64.b64encode(image_data).decode('utf-8')
+
+                    # Determine media type from content_type
+                    media_type = image.content_type or "image/jpeg"
+
+                    content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": base64_image
+                        }
+                    })
+
+                # Add text message
+                content.append({
+                    "type": "text",
+                    "text": message
+                })
+
+                # If only text, simplify content
+                if len(content) == 1:
+                    content = message
+
+                # Create streaming request
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
                     messages=[{
                         "role": "user",
                         "content": content
