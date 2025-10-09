@@ -1,11 +1,10 @@
 import os
 import json
 import base64
-from typing import Optional
+from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 import asyncio
 from dotenv import load_dotenv
 
@@ -25,17 +24,6 @@ app.add_middleware(
 )
 
 
-# Request Models
-class PerplexitySearchRequest(BaseModel):
-    query: str
-
-
-class AnthropicChatRequest(BaseModel):
-    message: str
-    image: Optional[str] = None
-    image_media_type: Optional[str] = "image/jpeg"
-    model: Optional[str] = "claude-3-5-sonnet-20241022"
-    max_tokens: Optional[int] = 1024
 
 
 # Health check endpoint
@@ -45,39 +33,76 @@ async def root():
         "status": "ok",
         "message": "E-commerce Chatbot API is running",
         "endpoints": {
-            "perplexity_search": "/api/chat/perplexity/stream",
-            "anthropic_chat": "/api/chat/anthropic/stream",
-            "anthropic_chat_upload": "/api/chat/anthropic/stream/upload"
+            "perplexity_chat": "/api/chat/perplexity/stream",
+            "anthropic_chat": "/api/chat/anthropic/stream"
+        },
+        "notes": {
+            "anthropic_chat": "Accepts both JSON and multipart/form-data (file uploads)",
+            "streaming": "All endpoints support streaming toggle via 'stream' parameter (default: true)"
         }
     }
 
 
-# Perplexity Search Streaming Endpoint
+# Perplexity Search Endpoint
 @app.post("/api/chat/perplexity/stream")
-async def perplexity_search_stream(request: PerplexitySearchRequest):
+async def perplexity_search_stream(
+    query: str,
+    stream: Optional[bool] = True
+):
     """
-    Stream chat completion responses from Perplexity API using chat.completions.create
-    Returns streaming response compatible with OpenAI format
+    Chat completion responses from Perplexity API using chat.completions.create
+    Supports both streaming and non-streaming modes via 'stream' parameter
     """
     try:
-        async def generate():
+        # Import here to avoid module-level initialization issues
+        from perplexity import Perplexity
+        from fastapi.responses import JSONResponse
+
+        api_key = os.getenv("PERPLEXITY_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="PERPLEXITY_API_KEY not configured")
+
+        client = Perplexity(api_key=api_key)
+
+        # Non-streaming mode
+        if not stream:
             try:
-                # Import here to avoid module-level initialization issues
-                from perplexity import Perplexity
-
-                api_key = os.getenv("PERPLEXITY_API_KEY")
-                if not api_key:
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'PERPLEXITY_API_KEY not configured'})}\n\n"
-                    return
-
-                client = Perplexity(api_key=api_key)
-
-                # Use chat completions API with streaming
-                stream = client.chat.completions.create(
+                completion = client.chat.completions.create(
                     messages=[
                         {
                             "role": "user",
-                            "content": request.query
+                            "content": query
+                        }
+                    ],
+                    model="sonar",
+                    stream=False
+                )
+
+                # Return complete response
+                response_data = {
+                    "type": "complete",
+                    "content": completion.choices[0].message.content,
+                    "finish_reason": completion.choices[0].finish_reason if hasattr(completion.choices[0], 'finish_reason') else "stop",
+                    "model": completion.model if hasattr(completion, 'model') else "sonar",
+                    "usage": {
+                        "prompt_tokens": completion.usage.prompt_tokens if hasattr(completion, 'usage') else None,
+                        "completion_tokens": completion.usage.completion_tokens if hasattr(completion, 'usage') else None,
+                        "total_tokens": completion.usage.total_tokens if hasattr(completion, 'usage') else None
+                    } if hasattr(completion, 'usage') else None
+                }
+                return JSONResponse(content=response_data)
+
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # Streaming mode
+        async def generate():
+            try:
+                stream_response = client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": query
                         }
                     ],
                     model="sonar",
@@ -85,7 +110,7 @@ async def perplexity_search_stream(request: PerplexitySearchRequest):
                 )
 
                 # Stream chunks as they arrive
-                for chunk in stream:
+                for chunk in stream_response:
                     if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
                         delta = chunk.choices[0].delta
 
@@ -127,191 +152,158 @@ async def perplexity_search_stream(request: PerplexitySearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Anthropic Chat Streaming Endpoint
-@app.post("/api/chat/anthropic/stream")
-async def anthropic_chat_stream(request: AnthropicChatRequest):
-    """
-    Stream chat responses from Anthropic API with optional image support
-    """
-    try:
-        async def generate():
-            try:
-                # Import here to avoid module-level initialization issues
-                from anthropic import Anthropic
-
-                api_key = os.getenv("ANTHROPIC_API_KEY")
-                if not api_key:
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'ANTHROPIC_API_KEY not configured'})}\n\n"
-                    return
-
-                client = Anthropic(api_key=api_key)
-
-                # Prepare message content
-                # If no image is provided, send text-only message
-                if not request.image or not request.image.strip():
-                    content = request.message
-                else:
-                    # Include both image and text
-                    content = [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": request.image_media_type,
-                                "data": request.image
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": request.message
-                        }
-                    ]
-
-                # Create streaming request
-                with client.messages.stream(
-                    model=request.model,
-                    max_tokens=request.max_tokens,
-                    messages=[{
-                        "role": "user",
-                        "content": content
-                    }]
-                ) as stream:
-                    for text in stream.text_stream:
-                        chunk_data = {
-                            "type": "content",
-                            "delta": text,
-                            "index": 0
-                        }
-                        yield f"data: {json.dumps(chunk_data)}\n\n"
-
-                    # Get the final response message
-                    final_message = stream.get_final_message()
-
-                    # Send finish reason
-                    finish_data = {
-                        "type": "finish",
-                        "finish_reason": final_message.stop_reason if hasattr(final_message, 'stop_reason') else "stop"
-                    }
-                    yield f"data: {json.dumps(finish_data)}\n\n"
-
-                # Send completion message
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-            except Exception as e:
-                error_data = {"type": "error", "message": str(e)}
-                yield f"data: {json.dumps(error_data)}\n\n"
-
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Anthropic Chat with File Upload (for easier testing in /docs)
-@app.post("/api/chat/anthropic/stream/upload")
-async def anthropic_chat_stream_upload(
-    message: str = Form(...),
-    image: Optional[UploadFile] = File(None),
-    model: Optional[str] = Form("claude-3-5-sonnet-20241022"),
-    max_tokens: Optional[int] = Form(1024)
+# Helper function for Anthropic chat processing
+async def _process_anthropic_chat(
+    client,
+    content,
+    model: str,
+    max_tokens: int,
+    stream: bool
 ):
     """
-    Stream chat responses from Anthropic API with file upload support.
-    This endpoint is optimized for testing in FastAPI /docs UI.
+    Internal helper to process Anthropic chat requests
+    Returns either JSONResponse or StreamingResponse
+    """
+    from fastapi.responses import JSONResponse
+
+    # Non-streaming mode
+    if not stream:
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{
+                "role": "user",
+                "content": content
+            }]
+        )
+
+        # Return complete response
+        response_data = {
+            "type": "complete",
+            "content": response.content[0].text if response.content else "",
+            "finish_reason": response.stop_reason if hasattr(response, 'stop_reason') else "stop",
+            "model": response.model if hasattr(response, 'model') else model,
+            "usage": {
+                "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') else None,
+                "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') else None
+            } if hasattr(response, 'usage') else None
+        }
+        return JSONResponse(content=response_data)
+
+    # Streaming mode
+    async def generate():
+        try:
+            with client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{
+                    "role": "user",
+                    "content": content
+                }]
+            ) as stream:
+                for text in stream.text_stream:
+                    chunk_data = {
+                        "type": "content",
+                        "delta": text,
+                        "index": 0
+                    }
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
+
+                # Get the final response message
+                final_message = stream.get_final_message()
+
+                # Send finish reason
+                finish_data = {
+                    "type": "finish",
+                    "finish_reason": final_message.stop_reason if hasattr(final_message, 'stop_reason') else "stop"
+                }
+                yield f"data: {json.dumps(finish_data)}\n\n"
+
+            # Send completion message
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            error_data = {"type": "error", "message": str(e)}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# Anthropic Chat Endpoint
+@app.post("/api/chat/anthropic/stream")
+async def anthropic_chat_stream(
+    message: str,
+    image: Optional[Union[str, UploadFile]] = None,
+    image_media_type: Optional[str] = "image/jpeg",
+    model: Optional[str] = "claude-3-5-sonnet-20241022",
+    max_tokens: Optional[int] = 1024,
+    stream: Optional[bool] = True
+):
+    """
+    Chat responses from Anthropic API with optional image support.
+    Accepts both JSON and multipart/form-data (file upload).
+    Supports both streaming and non-streaming modes via 'stream' parameter.
+
+    Parameters:
+    - message: User message text
+    - image: Either base64 string (JSON) or file upload (form-data)
+    - image_media_type: MIME type of image (default: image/jpeg)
+    - model: Claude model to use
+    - max_tokens: Maximum tokens in response
+    - stream: Enable streaming mode (default: true)
     """
     try:
-        # Read image data BEFORE the generator function
-        image_base64 = None
-        image_media_type = None
+        from anthropic import Anthropic
 
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+
+        client = Anthropic(api_key=api_key)
+
+        # Process image input
+        img_base64 = None
         if image:
-            image_data = await image.read()
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            image_media_type = image.content_type or "image/jpeg"
+            if isinstance(image, UploadFile):
+                # File upload
+                image_data = await image.read()
+                img_base64 = base64.b64encode(image_data).decode('utf-8')
+                image_media_type = image.content_type or image_media_type
+            elif isinstance(image, str) and image.strip():
+                # Base64 string from JSON
+                img_base64 = image
 
-        async def generate():
-            try:
-                from anthropic import Anthropic
-
-                api_key = os.getenv("ANTHROPIC_API_KEY")
-                if not api_key:
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'ANTHROPIC_API_KEY not configured'})}\n\n"
-                    return
-
-                client = Anthropic(api_key=api_key)
-
-                # Prepare message content
-                if image_base64:
-                    # Include both image and text
-                    content = [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": image_media_type,
-                                "data": image_base64
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": message
-                        }
-                    ]
-                else:
-                    # Text only
-                    content = message
-
-                # Create streaming request
-                with client.messages.stream(
-                    model=model,
-                    max_tokens=max_tokens,
-                    messages=[{
-                        "role": "user",
-                        "content": content
-                    }]
-                ) as stream:
-                    for text in stream.text_stream:
-                        chunk_data = {
-                            "type": "content",
-                            "delta": text,
-                            "index": 0
-                        }
-                        yield f"data: {json.dumps(chunk_data)}\n\n"
-
-                    # Get the final response message
-                    final_message = stream.get_final_message()
-
-                    # Send finish reason
-                    finish_data = {
-                        "type": "finish",
-                        "finish_reason": final_message.stop_reason if hasattr(final_message, 'stop_reason') else "stop"
+        # Prepare message content
+        if img_base64:
+            # Include both image and text
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image_media_type,
+                        "data": img_base64
                     }
-                    yield f"data: {json.dumps(finish_data)}\n\n"
+                },
+                {
+                    "type": "text",
+                    "text": message
+                }
+            ]
+        else:
+            # Text only
+            content = message
 
-                # Send completion message
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-            except Exception as e:
-                error_data = {"type": "error", "message": str(e)}
-                yield f"data: {json.dumps(error_data)}\n\n"
-
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
+        # Process request using helper function
+        return await _process_anthropic_chat(client, content, model, max_tokens, stream)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

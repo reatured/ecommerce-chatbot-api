@@ -4,10 +4,11 @@ FastAPI backend providing AI-powered chat and search capabilities via streaming 
 
 ## Available APIs
 
-### 1. Anthropic Chat Stream
+### 1. Anthropic Chat
 **Endpoint:** `POST /api/chat/anthropic/stream`
 
-Streams AI chat responses from Claude (Anthropic) using Server-Sent Events (SSE).
+Chat responses from Claude (Anthropic). Supports both streaming and non-streaming modes.
+Accepts both JSON (`application/json`) and file uploads (`multipart/form-data`).
 
 **Request:**
 ```json
@@ -16,17 +17,32 @@ Streams AI chat responses from Claude (Anthropic) using Server-Sent Events (SSE)
   "image": "base64_encoded_image_data",  // optional
   "image_media_type": "image/jpeg",       // optional, default: "image/jpeg"
   "model": "claude-3-5-sonnet-20241022",  // optional
-  "max_tokens": 1024                      // optional
+  "max_tokens": 1024,                     // optional
+  "stream": true                          // optional, default: true
 }
 ```
 
-**Response Format:** Server-Sent Events (SSE)
+**Streaming Response (`stream: true`):** Server-Sent Events (SSE)
 ```
 data: {"type": "content", "delta": "Hello", "index": 0}
 data: {"type": "content", "delta": "! I'd", "index": 0}
 data: {"type": "content", "delta": " be happy", "index": 0}
 data: {"type": "finish", "finish_reason": "stop"}
 data: {"type": "done"}
+```
+
+**Non-Streaming Response (`stream: false`):** JSON
+```json
+{
+  "type": "complete",
+  "content": "Hello! I'd be happy to recommend some gift ideas for coffee lovers...",
+  "finish_reason": "stop",
+  "model": "claude-3-5-sonnet-20241022",
+  "usage": {
+    "input_tokens": 15,
+    "output_tokens": 120
+  }
+}
 ```
 
 **Response Event Types:**
@@ -47,46 +63,68 @@ curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
 
 ---
 
-### 2. Anthropic Chat with File Upload
-**Endpoint:** `POST /api/chat/anthropic/stream/upload`
+**File Upload Support:**
 
-Same as above but accepts file uploads (perfect for testing in `/docs` UI).
+The same endpoint accepts `multipart/form-data` for file uploads (perfect for testing in `/docs` UI).
 
-**Request:** `multipart/form-data`
+**Form Fields:**
 - `message` (text, required)
 - `image` (file, optional)
 - `model` (text, optional)
 - `max_tokens` (integer, optional)
+- `stream` (boolean, optional, default: true)
 
-**Response:** Same SSE format as regular Anthropic endpoint
-
-**Example:**
+**Examples with File Upload:**
 ```bash
-curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream/upload \
+# Streaming mode with file upload
+curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
   -F "message=What's in this image?" \
-  -F "image=@photo.jpg"
+  -F "image=@photo.jpg" \
+  -F "stream=true"
+
+# Non-streaming mode with file upload
+curl -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
+  -F "message=What's in this image?" \
+  -F "image=@photo.jpg" \
+  -F "stream=false"
 ```
 
 ---
 
-### 3. Perplexity Chat Stream
+### 2. Perplexity Chat
 **Endpoint:** `POST /api/chat/perplexity/stream`
 
-Streams web-grounded chat responses from Perplexity AI using the Sonar model.
+Web-grounded chat responses from Perplexity AI using the Sonar model. Supports both streaming and non-streaming modes.
 
 **Request:**
 ```json
 {
-  "query": "What are the latest AI developments?"
+  "query": "What are the latest AI developments?",
+  "stream": true  // optional, default: true
 }
 ```
 
-**Response Format:** Server-Sent Events (SSE)
+**Streaming Response (`stream: true`):** Server-Sent Events (SSE)
 ```
 data: {"type": "content", "delta": "Based on", "index": 0}
 data: {"type": "content", "delta": " recent information", "index": 0}
 data: {"type": "finish", "finish_reason": "stop"}
 data: {"type": "done"}
+```
+
+**Non-Streaming Response (`stream: false`):** JSON
+```json
+{
+  "type": "complete",
+  "content": "Based on recent information, here are the latest AI developments...",
+  "finish_reason": "stop",
+  "model": "sonar",
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 150,
+    "total_tokens": 160
+  }
+}
 ```
 
 **Response Event Types:**
@@ -98,16 +136,22 @@ data: {"type": "done"}
 - `done` - Stream completion marker
 - `error` - Error message if something fails
 
-**Example:**
+**Examples:**
 ```bash
+# Streaming mode
 curl -N -X POST http://127.0.0.1:8000/api/chat/perplexity/stream \
   -H "Content-Type: application/json" \
-  -d '{"query": "best wireless headphones 2025"}'
+  -d '{"query": "best wireless headphones 2025", "stream": true}'
+
+# Non-streaming mode
+curl -X POST http://127.0.0.1:8000/api/chat/perplexity/stream \
+  -H "Content-Type: application/json" \
+  -d '{"query": "best wireless headphones 2025", "stream": false}'
 ```
 
 ---
 
-### 4. Health Check
+### 3. Health Check
 **Endpoint:** `GET /`
 
 Returns API status and available endpoints.
@@ -118,9 +162,12 @@ Returns API status and available endpoints.
   "status": "ok",
   "message": "E-commerce Chatbot API is running",
   "endpoints": {
-    "perplexity_search": "/api/chat/perplexity/stream",
-    "anthropic_chat": "/api/chat/anthropic/stream",
-    "anthropic_chat_upload": "/api/chat/anthropic/stream/upload"
+    "perplexity_chat": "/api/chat/perplexity/stream",
+    "anthropic_chat": "/api/chat/anthropic/stream"
+  },
+  "notes": {
+    "anthropic_chat": "Accepts both JSON and multipart/form-data (file uploads)",
+    "streaming": "All endpoints support streaming toggle via 'stream' parameter (default: true)"
   }
 }
 ```
@@ -131,10 +178,10 @@ Returns API status and available endpoints.
 
 ### Frontend Implementation (React/TypeScript)
 
-Here's how to integrate these streaming endpoints into your Lovable chatbot application:
+Here's how to integrate these endpoints into your Lovable chatbot application with streaming toggle:
 
 ```typescript
-// 1. Set up EventSource to consume SSE
+// 1. Chat with streaming support
 async function streamChatResponse(
   endpoint: string,
   payload: any,
@@ -174,13 +221,10 @@ async function streamChatResponse(
             const parsed = JSON.parse(jsonData);
 
             if (parsed.type === 'content') {
-              // Append the delta to your chat message
               onChunk(parsed.delta);
             } else if (parsed.type === 'finish') {
-              // Stream finished successfully
               console.log('Finish reason:', parsed.finish_reason);
             } else if (parsed.type === 'done') {
-              // All done
               onComplete();
               break;
             } else if (parsed.type === 'error') {
@@ -198,48 +242,106 @@ async function streamChatResponse(
   }
 }
 
-// 2. Use in your chat component
+// 2. Non-streaming chat
+async function chatResponse(
+  endpoint: string,
+  payload: any,
+  onComplete: (content: string) => void,
+  onError: (error: string) => void
+) {
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, stream: false }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (data.type === 'complete') {
+      onComplete(data.content);
+    } else if (data.type === 'error') {
+      onError(data.message);
+    }
+  } catch (error) {
+    onError(error instanceof Error ? error.message : 'Unknown error');
+  }
+}
+
+// 3. Use in your chat component with toggle
 function ChatComponent() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [currentResponse, setCurrentResponse] = useState('');
+  const [isStreaming, setIsStreaming] = useState(true); // Toggle state
 
   const sendMessage = async (userMessage: string) => {
     // Add user message to chat
     setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
-
-    // Reset current response
     setCurrentResponse('');
 
-    // Stream AI response
-    await streamChatResponse(
-      'http://127.0.0.1:8000/api/chat/anthropic/stream',
-      { message: userMessage },
-      (delta) => {
-        // Append each chunk to the current response
-        setCurrentResponse(prev => prev + delta);
-      },
-      () => {
-        // When complete, add to messages array
-        setMessages(prev => [
-          ...prev,
-          { role: 'assistant', content: currentResponse }
-        ]);
-        setCurrentResponse('');
-      },
-      (error) => {
-        console.error('Stream error:', error);
-        // Show error to user
-      }
-    );
+    if (isStreaming) {
+      // Streaming mode
+      await streamChatResponse(
+        'http://127.0.0.1:8000/api/chat/anthropic/stream',
+        { message: userMessage, stream: true },
+        (delta) => {
+          setCurrentResponse(prev => prev + delta);
+        },
+        () => {
+          setMessages(prev => [
+            ...prev,
+            { role: 'assistant', content: currentResponse }
+          ]);
+          setCurrentResponse('');
+        },
+        (error) => {
+          console.error('Stream error:', error);
+        }
+      );
+    } else {
+      // Non-streaming mode
+      await chatResponse(
+        'http://127.0.0.1:8000/api/chat/anthropic/stream',
+        { message: userMessage },
+        (content) => {
+          setMessages(prev => [
+            ...prev,
+            { role: 'assistant', content }
+          ]);
+        },
+        (error) => {
+          console.error('Chat error:', error);
+        }
+      );
+    }
   };
 
   return (
     <div className="chat-container">
+      {/* Streaming toggle */}
+      <div className="controls">
+        <label>
+          <input
+            type="checkbox"
+            checked={isStreaming}
+            onChange={(e) => setIsStreaming(e.target.checked)}
+          />
+          Enable Streaming
+        </label>
+      </div>
+
+      {/* Messages */}
       {messages.map((msg, i) => (
         <div key={i} className={msg.role}>
           {msg.content}
         </div>
       ))}
+
+      {/* Streaming response indicator */}
       {currentResponse && (
         <div className="assistant streaming">
           {currentResponse}
