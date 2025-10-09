@@ -1,6 +1,6 @@
 # E-commerce Chatbot API
 
-FastAPI backend providing AI-powered chat and search capabilities via streaming endpoints. Compatible with OpenAI-style chat completions format.
+FastAPI backend providing AI-powered chat capabilities via streaming endpoints. Compatible with OpenAI-style chat completions format.
 
 ## Available APIs
 
@@ -8,19 +8,19 @@ FastAPI backend providing AI-powered chat and search capabilities via streaming 
 **Endpoint:** `POST /api/chat/anthropic/stream`
 
 Chat responses from Claude (Anthropic). Supports both streaming and non-streaming modes.
-Accepts both JSON (`application/json`) and file uploads (`multipart/form-data`).
+Accepts file uploads via `multipart/form-data`.
 
-**Request:**
-```json
-{
-  "message": "Recommend gift ideas for coffee lovers",
-  "image": "base64_encoded_image_data",  // optional
-  "image_media_type": "image/jpeg",       // optional, default: "image/jpeg"
-  "model": "claude-3-5-sonnet-20241022",  // optional
-  "max_tokens": 1024,                     // optional
-  "stream": true                          // optional, default: true
-}
-```
+**Request Parameters:**
+- `message` (text, required) - Your message to Claude
+- `conversation_history` (text, optional) - JSON string of previous messages to maintain context
+  - Format: `[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]`
+  - See [CONVERSATION_HISTORY.md](CONVERSATION_HISTORY.md) for detailed guide
+- `system` (text, optional) - System message to set Claude's behavior and context
+- `image` (file, optional) - Image file to upload
+- `image_media_type` (text, optional, default: "image/jpeg") - Image MIME type
+- `model` (text, optional, default: "claude-3-5-haiku-latest") - Model name
+- `max_tokens` (integer, optional, default: 1024) - Max response tokens
+- `stream` (boolean, optional, default: true) - Enable streaming
 
 **Streaming Response (`stream: true`):** Server-Sent Events (SSE)
 ```
@@ -54,104 +54,47 @@ data: {"type": "done"}
 - `done` - Stream completion marker
 - `error` - Error message if something fails
 
-**Example:**
+**Examples:**
+
 ```bash
+# Text only (streaming)
 curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Recommend gift ideas for coffee lovers"}'
-```
+  -F "message=Recommend gift ideas for coffee lovers" \
+  -F "stream=true"
 
----
+# With system message
+curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
+  -F "message=Recommend some products" \
+  -F "system=You are a helpful e-commerce shopping assistant. Be concise and friendly." \
+  -F "stream=true"
 
-**File Upload Support:**
-
-The same endpoint accepts `multipart/form-data` for file uploads (perfect for testing in `/docs` UI).
-
-**Form Fields:**
-- `message` (text, required)
-- `image` (file, optional)
-- `model` (text, optional)
-- `max_tokens` (integer, optional)
-- `stream` (boolean, optional, default: true)
-
-**Examples with File Upload:**
-```bash
-# Streaming mode with file upload
+# With image upload
 curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
   -F "message=What's in this image?" \
   -F "image=@photo.jpg" \
   -F "stream=true"
 
-# Non-streaming mode with file upload
-curl -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
-  -F "message=What's in this image?" \
-  -F "image=@photo.jpg" \
+# With conversation history (multi-turn conversation)
+curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
+  -F "message=Which one is best for music?" \
+  -F 'conversation_history=[{"role":"user","content":"What are good headphones?"},{"role":"assistant","content":"I recommend Sony WH-1000XM5, Bose QuietComfort, or Apple AirPods Max..."}]' \
+  -F "stream=false"
+
+# Complete example with all parameters
+curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
+  -F "message=What product is this and where can I buy it?" \
+  -F "system=You are a product identification expert. Identify products and suggest where to purchase them." \
+  -F "image=@product.jpg" \
+  -F "model=claude-3-5-haiku-latest" \
+  -F "max_tokens=2048" \
   -F "stream=false"
 ```
 
----
-
-### 2. Perplexity Chat
-**Endpoint:** `POST /api/chat/perplexity/stream`
-
-Web-grounded chat responses from Perplexity AI using the Sonar model. Supports both streaming and non-streaming modes.
-
-**Request:**
-```json
-{
-  "query": "What are the latest AI developments?",
-  "stream": true  // optional, default: true
-}
-```
-
-**Streaming Response (`stream: true`):** Server-Sent Events (SSE)
-```
-data: {"type": "content", "delta": "Based on", "index": 0}
-data: {"type": "content", "delta": " recent information", "index": 0}
-data: {"type": "finish", "finish_reason": "stop"}
-data: {"type": "done"}
-```
-
-**Non-Streaming Response (`stream: false`):** JSON
-```json
-{
-  "type": "complete",
-  "content": "Based on recent information, here are the latest AI developments...",
-  "finish_reason": "stop",
-  "model": "sonar",
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 150,
-    "total_tokens": 160
-  }
-}
-```
-
-**Response Event Types:**
-- `content` - Text chunks from the AI response
-  - `delta`: The text content chunk
-  - `index`: Choice index
-- `finish` - Completion indicator
-  - `finish_reason`: Reason for completion
-- `done` - Stream completion marker
-- `error` - Error message if something fails
-
-**Examples:**
-```bash
-# Streaming mode
-curl -N -X POST http://127.0.0.1:8000/api/chat/perplexity/stream \
-  -H "Content-Type: application/json" \
-  -d '{"query": "best wireless headphones 2025", "stream": true}'
-
-# Non-streaming mode
-curl -X POST http://127.0.0.1:8000/api/chat/perplexity/stream \
-  -H "Content-Type: application/json" \
-  -d '{"query": "best wireless headphones 2025", "stream": false}'
-```
+**📚 For detailed conversation history documentation, see [CONVERSATION_HISTORY.md](CONVERSATION_HISTORY.md)**
 
 ---
 
-### 3. Health Check
+### 2. Health Check
 **Endpoint:** `GET /`
 
 Returns API status and available endpoints.
@@ -162,12 +105,11 @@ Returns API status and available endpoints.
   "status": "ok",
   "message": "E-commerce Chatbot API is running",
   "endpoints": {
-    "perplexity_chat": "/api/chat/perplexity/stream",
     "anthropic_chat": "/api/chat/anthropic/stream"
   },
   "notes": {
-    "anthropic_chat": "Accepts both JSON and multipart/form-data (file uploads)",
-    "streaming": "All endpoints support streaming toggle via 'stream' parameter (default: true)"
+    "anthropic_chat": "Accepts multipart/form-data with optional file uploads",
+    "streaming": "Supports streaming toggle via 'stream' parameter (default: true)"
   }
 }
 ```
@@ -184,16 +126,24 @@ Here's how to integrate these endpoints into your Lovable chatbot application wi
 // 1. Chat with streaming support
 async function streamChatResponse(
   endpoint: string,
-  payload: any,
+  message: string,
+  conversationHistory?: Array<{role: string, content: string}>,
   onChunk: (text: string) => void,
   onComplete: () => void,
   onError: (error: string) => void
 ) {
   try {
+    const formData = new FormData();
+    formData.append('message', message);
+    formData.append('stream', 'true');
+
+    if (conversationHistory && conversationHistory.length > 0) {
+      formData.append('conversation_history', JSON.stringify(conversationHistory));
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: formData,
     });
 
     if (!response.ok) {
@@ -245,15 +195,23 @@ async function streamChatResponse(
 // 2. Non-streaming chat
 async function chatResponse(
   endpoint: string,
-  payload: any,
+  message: string,
+  conversationHistory?: Array<{role: string, content: string}>,
   onComplete: (content: string) => void,
   onError: (error: string) => void
 ) {
   try {
+    const formData = new FormData();
+    formData.append('message', message);
+    formData.append('stream', 'false');
+
+    if (conversationHistory && conversationHistory.length > 0) {
+      formData.append('conversation_history', JSON.stringify(conversationHistory));
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, stream: false }),
+      body: formData,
     });
 
     if (!response.ok) {
@@ -272,29 +230,41 @@ async function chatResponse(
   }
 }
 
-// 3. Use in your chat component with toggle
+// 3. Use in your chat component with toggle and conversation history
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 function ChatComponent() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [currentResponse, setCurrentResponse] = useState('');
-  const [isStreaming, setIsStreaming] = useState(true); // Toggle state
+  const [isStreaming, setIsStreaming] = useState(true);
 
   const sendMessage = async (userMessage: string) => {
     // Add user message to chat
-    setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    const newUserMessage: Message = { role: 'user', content: userMessage };
+    setMessages(prev => [...prev, newUserMessage]);
     setCurrentResponse('');
+
+    // Prepare conversation history (all messages except the one we're about to send)
+    const history = messages;
 
     if (isStreaming) {
       // Streaming mode
+      let fullResponse = '';
       await streamChatResponse(
         'http://127.0.0.1:8000/api/chat/anthropic/stream',
-        { message: userMessage, stream: true },
+        userMessage,
+        history,
         (delta) => {
-          setCurrentResponse(prev => prev + delta);
+          fullResponse += delta;
+          setCurrentResponse(fullResponse);
         },
         () => {
           setMessages(prev => [
             ...prev,
-            { role: 'assistant', content: currentResponse }
+            { role: 'assistant', content: fullResponse }
           ]);
           setCurrentResponse('');
         },
@@ -306,7 +276,8 @@ function ChatComponent() {
       // Non-streaming mode
       await chatResponse(
         'http://127.0.0.1:8000/api/chat/anthropic/stream',
-        { message: userMessage },
+        userMessage,
+        history,
         (content) => {
           setMessages(prev => [
             ...prev,
@@ -355,24 +326,29 @@ function ChatComponent() {
 
 ### Key Integration Points
 
-1. **Streaming State Management**
+1. **Conversation History Management**
+   - Store all messages in React state
+   - Send conversation history with each new message
+   - API is stateless - frontend manages all context
+
+2. **Streaming State Management**
    - Use a temporary state (`currentResponse`) for the streaming message
    - Append `delta` values as they arrive
    - Move to permanent messages array when stream completes
 
-2. **Visual Feedback**
+3. **Visual Feedback**
    - Show a typing cursor while streaming
    - Render text incrementally for better UX
    - Handle loading/error states
 
-3. **Error Handling**
+4. **Error Handling**
    - Catch network errors
    - Handle API errors from `type: "error"` events
    - Show user-friendly error messages
 
-4. **Image Support**
-   - Convert file to base64 for Anthropic endpoint
-   - Use the `/upload` endpoint for simpler multipart uploads
+5. **Image Support**
+   - Use FormData to append image files directly
+   - API accepts multipart/form-data for file uploads
 
 ---
 
@@ -392,7 +368,6 @@ uvicorn api.index:app --reload --port 8000
 
 **Required environment variables:**
 - `ANTHROPIC_API_KEY`
-- `PERPLEXITY_API_KEY`
 
 **Test in browser:**
 - API docs UI: `http://127.0.0.1:8000/docs`
