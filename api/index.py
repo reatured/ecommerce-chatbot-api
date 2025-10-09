@@ -159,6 +159,10 @@ async def anthropic_chat_stream(
     try:
         from anthropic import Anthropic
 
+        # Validate message is not empty
+        if not message or not message.strip():
+            raise HTTPException(status_code=400, detail="Message cannot be empty")
+
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
@@ -173,7 +177,15 @@ async def anthropic_chat_stream(
             try:
                 history = json.loads(conversation_history)
                 if isinstance(history, list):
-                    messages.extend(history)
+                    # Filter out messages with empty content
+                    valid_history = [
+                        msg for msg in history
+                        if msg.get('content') and (
+                            isinstance(msg['content'], str) and msg['content'].strip()
+                            or isinstance(msg['content'], list) and len(msg['content']) > 0
+                        )
+                    ]
+                    messages.extend(valid_history)
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid conversation_history JSON format")
 
