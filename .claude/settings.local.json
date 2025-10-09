@@ -11,7 +11,10 @@
       "Bash(pip3 install:*)",
       "Bash(uvicorn:*)",
       "Bash(curl -s http://127.0.0.1:8000/)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
