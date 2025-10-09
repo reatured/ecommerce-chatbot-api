@@ -91,9 +91,12 @@ curl -N -X POST http://127.0.0.1:8000/api/chat/anthropic/stream \
 ```
 
 **📚 Documentation:**
-- Conversation history guide: [CONVERSATION_HISTORY.md](CONVERSATION_HISTORY.md)
+- **For Lovable (START HERE):** [LOVABLE_PROMPT.md](LOVABLE_PROMPT.md) - Complete copy-paste integration
+- Conversation history: [CONVERSATION_HISTORY.md](CONVERSATION_HISTORY.md)
 - Error reference: [ERROR_REFERENCE.md](ERROR_REFERENCE.md)
-- Frontend fixes: [FRONTEND_FIX.md](FRONTEND_FIX.md)
+- Frontend setup: [FRONTEND_SETUP.md](FRONTEND_SETUP.md)
+- Integration examples: [FRONTEND_INTEGRATION.md](FRONTEND_INTEGRATION.md)
+- Troubleshooting: [FRONTEND_FIX.md](FRONTEND_FIX.md)
 
 ---
 

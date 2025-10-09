@@ -40,3 +40,13 @@ Thumbs.db
 
 # Vercel
 .vercel
+
+# Documentation (internal use only)
+CONVERSATION_HISTORY.md
+ERROR_REFERENCE.md
+FRONTEND_FIX.md
+FRONTEND_SETUP.md
+FRONTEND_INTEGRATION.md
+LOVABLE_PROMPT.md
+DOCUMENTATION_INDEX.md
+test_image_upload.sh
