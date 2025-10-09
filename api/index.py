@@ -137,8 +137,8 @@ async def anthropic_chat_stream(request: AnthropicChatRequest):
                 # Prepare message content
                 content = []
 
-                # Add image if provided
-                if request.image:
+                # Add image if provided (check for non-empty string)
+                if request.image and request.image.strip():
                     content.append({
                         "type": "image",
                         "source": {
