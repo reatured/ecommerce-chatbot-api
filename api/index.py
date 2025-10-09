@@ -135,24 +135,25 @@ async def anthropic_chat_stream(request: AnthropicChatRequest):
                 client = Anthropic(api_key=api_key)
 
                 # Prepare message content
-                content = []
-
-                # Add image if provided (check for non-empty string)
-                if request.image and request.image.strip():
-                    content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": request.image_media_type,
-                            "data": request.image
+                # If no image is provided, send text-only message
+                if not request.image or not request.image.strip():
+                    content = request.message
+                else:
+                    # Include both image and text
+                    content = [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": request.image_media_type,
+                                "data": request.image
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": request.message
                         }
-                    })
-
-                # Add text message
-                content.append({
-                    "type": "text",
-                    "text": request.message
-                })
+                    ]
 
                 # Create streaming request
                 with client.messages.stream(
