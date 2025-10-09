@@ -56,7 +56,8 @@ async def root():
 @app.post("/api/chat/perplexity/stream")
 async def perplexity_search_stream(request: PerplexitySearchRequest):
     """
-    Stream search results from Perplexity API
+    Stream chat completion responses from Perplexity API using chat.completions.create
+    Returns streaming response compatible with OpenAI format
     """
     try:
         async def generate():
@@ -71,33 +72,42 @@ async def perplexity_search_stream(request: PerplexitySearchRequest):
 
                 client = Perplexity(api_key=api_key)
 
-                # Perform search
-                # Note: Only query is required, other params may not be supported in all SDK versions
-                search_params = {
-                    "query": request.query
-                }
+                # Use chat completions API with streaming
+                stream = client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": request.query
+                        }
+                    ],
+                    model="sonar",
+                    stream=True
+                )
 
-                search_result = client.search.create(**search_params)
+                # Stream chunks as they arrive
+                for chunk in stream:
+                    if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
+                        delta = chunk.choices[0].delta
 
-                # Stream the search ID first
-                yield f"data: {json.dumps({'type': 'search_id', 'id': search_result.id})}\n\n"
+                        # Stream content
+                        if hasattr(delta, 'content') and delta.content:
+                            chunk_data = {
+                                "type": "content",
+                                "delta": delta.content,
+                                "index": chunk.choices[0].index
+                            }
+                            yield f"data: {json.dumps(chunk_data)}\n\n"
 
-                # Stream each result
-                for idx, result in enumerate(search_result.results):
-                    result_data = {
-                        "type": "result",
-                        "index": idx,
-                        "title": result.title,
-                        "url": result.url,
-                        "snippet": result.snippet,
-                        "date": getattr(result, 'date', None),
-                        "last_updated": getattr(result, 'last_updated', None)
-                    }
-                    yield f"data: {json.dumps(result_data)}\n\n"
-                    await asyncio.sleep(0.1)
+                        # Handle finish reason
+                        if hasattr(chunk.choices[0], 'finish_reason') and chunk.choices[0].finish_reason:
+                            finish_data = {
+                                "type": "finish",
+                                "finish_reason": chunk.choices[0].finish_reason
+                            }
+                            yield f"data: {json.dumps(finish_data)}\n\n"
 
                 # Send completion message
-                yield f"data: {json.dumps({'type': 'done', 'total_results': len(search_result.results)})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
             except Exception as e:
                 error_data = {"type": "error", "message": str(e)}
@@ -169,9 +179,20 @@ async def anthropic_chat_stream(request: AnthropicChatRequest):
                     for text in stream.text_stream:
                         chunk_data = {
                             "type": "content",
-                            "text": text
+                            "delta": text,
+                            "index": 0
                         }
                         yield f"data: {json.dumps(chunk_data)}\n\n"
+
+                    # Get the final response message
+                    final_message = stream.get_final_message()
+
+                    # Send finish reason
+                    finish_data = {
+                        "type": "finish",
+                        "finish_reason": final_message.stop_reason if hasattr(final_message, 'stop_reason') else "stop"
+                    }
+                    yield f"data: {json.dumps(finish_data)}\n\n"
 
                 # Send completion message
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -207,6 +228,15 @@ async def anthropic_chat_stream_upload(
     This endpoint is optimized for testing in FastAPI /docs UI.
     """
     try:
+        # Read image data BEFORE the generator function
+        image_base64 = None
+        image_media_type = None
+
+        if image:
+            image_data = await image.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            image_media_type = image.content_type or "image/jpeg"
+
         async def generate():
             try:
                 from anthropic import Anthropic
@@ -219,34 +249,24 @@ async def anthropic_chat_stream_upload(
                 client = Anthropic(api_key=api_key)
 
                 # Prepare message content
-                content = []
-
-                # Add image if uploaded
-                if image:
-                    # Read file and convert to base64
-                    image_data = await image.read()
-                    base64_image = base64.b64encode(image_data).decode('utf-8')
-
-                    # Determine media type from content_type
-                    media_type = image.content_type or "image/jpeg"
-
-                    content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": base64_image
+                if image_base64:
+                    # Include both image and text
+                    content = [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image_media_type,
+                                "data": image_base64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": message
                         }
-                    })
-
-                # Add text message
-                content.append({
-                    "type": "text",
-                    "text": message
-                })
-
-                # If only text, simplify content
-                if len(content) == 1:
+                    ]
+                else:
+                    # Text only
                     content = message
 
                 # Create streaming request
@@ -261,9 +281,20 @@ async def anthropic_chat_stream_upload(
                     for text in stream.text_stream:
                         chunk_data = {
                             "type": "content",
-                            "text": text
+                            "delta": text,
+                            "index": 0
                         }
                         yield f"data: {json.dumps(chunk_data)}\n\n"
+
+                    # Get the final response message
+                    final_message = stream.get_final_message()
+
+                    # Send finish reason
+                    finish_data = {
+                        "type": "finish",
+                        "finish_reason": final_message.stop_reason if hasattr(final_message, 'stop_reason') else "stop"
+                    }
+                    yield f"data: {json.dumps(finish_data)}\n\n"
 
                 # Send completion message
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
