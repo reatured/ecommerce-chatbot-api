@@ -88,6 +88,7 @@ Response Guidelines:
 2. **When showing products**, format your response as JSON:
    {
      "message": "Your conversational message here",
+     "display_products": true,
      "products": [array of products from tool results],
      "actions": ["Quick action 1", "Quick action 2"]
    }
@@ -95,17 +96,28 @@ Response Guidelines:
 4. **Be proactive**: If user says "find backpacks", use search_products tool
 5. **Natural flow**: Don't mention tools/stages to the user - just use them seamlessly
 
+Product Display Control:
+- Set "display_products": true when you want to SHOW products in the side panel
+- Set "display_products": false (or omit) when just MENTIONING products in conversation
+- Examples:
+  * User: "Find backpacks" → display_products: true (show panel with products)
+  * User: "What categories do you have?" → display_products: false (just list in text)
+  * User: "Show me cars" → display_products: true (show panel)
+  * User uploads image → display_products: true (show similar products)
+
 Examples:
-- User: "Hi" → Respond conversationally (no tools)
-- User: "Find me a backpack" → Use search_products(query="backpack")
-- User: "Show me red cars under $30k" → Use search_products(query="red under 30000", category="car")
-- User: [uploads image] → Identify product, use search_products to find similar
+- User: "Hi" → Respond conversationally (no tools, no display_products)
+- User: "Find me a backpack" → Use search_products(query="backpack"), set display_products: true
+- User: "Show me red cars under $30k" → Use search_products(query="red under 30000", category="car"), set display_products: true
+- User: [uploads image] → Identify product, use search_products to find similar, set display_products: true
+- User: "What do you sell?" → Respond in text, set display_products: false or omit
 
 Important:
 - ONLY use tools when you need product data
 - For general questions, just respond normally
 - Format product responses as JSON when showing products
 - Keep conversational and friendly
+- Use display_products: true ONLY when user wants to browse/view products
 """
 
 
@@ -413,30 +425,35 @@ async def _process_anthropic_chat_with_tools(
                 # Stream the final response text
                 final_text = response.content[0].text if response.content else ""
 
-                # Parse the response to separate message and metadata
-                message_content_started = False
-                message_content_ended = False
-                buffer = final_text
-
                 # Try to find JSON structure
-                if buffer.strip().startswith("{"):
+                if final_text.strip().startswith("{"):
                     # Likely JSON response with products
                     try:
-                        json_obj = json.loads(buffer)
+                        json_obj = json.loads(final_text)
                         message_text = json_obj.get("message", "")
 
-                        # Stream the message part
+                        # Stream the beginning of JSON as metadata (everything before "message": ")
+                        # This ensures fullJSON gets the complete structure
+                        json_start = final_text[:final_text.find('"message"')]
+                        if json_start:
+                            yield f"data: {json.dumps({'type': 'metadata', 'delta': json_start + '\"message\": \"', 'index': 0})}\n\n"
+
+                        # Stream the message text as content
                         yield f"data: {json.dumps({'type': 'content', 'delta': message_text, 'index': 0})}\n\n"
 
-                        # Stream the metadata (products, actions)
-                        metadata = buffer
-                        yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata, 'index': 0})}\n\n"
+                        # Stream the rest of JSON as metadata (closing quote, products, actions, etc.)
+                        message_start = final_text.find('"message": "') + len('"message": "')
+                        message_end = message_start + len(message_text)
+                        json_end = final_text[message_end:]
+                        if json_end:
+                            yield f"data: {json.dumps({'type': 'metadata', 'delta': json_end, 'index': 0})}\n\n"
+
                     except json.JSONDecodeError:
                         # Not valid JSON, stream as regular content
-                        yield f"data: {json.dumps({'type': 'content', 'delta': buffer, 'index': 0})}\n\n"
+                        yield f"data: {json.dumps({'type': 'content', 'delta': final_text, 'index': 0})}\n\n"
                 else:
                     # Regular text response
-                    yield f"data: {json.dumps({'type': 'content', 'delta': buffer, 'index': 0})}\n\n"
+                    yield f"data: {json.dumps({'type': 'content', 'delta': final_text, 'index': 0})}\n\n"
 
                 # Send finish reason
                 finish_data = {
