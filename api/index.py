@@ -14,6 +14,9 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="E-commerce Chatbot API", version="1.0.0")
 
+# Import products router
+from api.products import router as products_router
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -22,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include products router
+app.include_router(products_router)
 
 
 
@@ -33,11 +39,15 @@ async def root():
         "status": "ok",
         "message": "E-commerce Chatbot API is running",
         "endpoints": {
-            "anthropic_chat": "/api/chat/anthropic/stream"
+            "anthropic_chat": "/api/chat/anthropic/stream",
+            "products_search": "/api/products/search?q={query}",
+            "product_by_id": "/api/products/{id}"
         },
         "notes": {
             "anthropic_chat": "Accepts both JSON and multipart/form-data (file uploads)",
-            "streaming": "Supports streaming toggle via 'stream' parameter (default: true)"
+            "streaming": "Supports streaming toggle via 'stream' parameter (default: true)",
+            "products_search": "Search products by name, description, brand, tags, or color",
+            "product_by_id": "Get detailed product information by ID"
         }
     }
 
