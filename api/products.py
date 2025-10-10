@@ -57,7 +57,39 @@ def fetch_products_from_sheet() -> List[Dict]:
         return []
 
 
+@router.get("/api/products")
+async def get_products(
+    category: Optional[str] = Query(None, description="Filter by category (car or backpack)"),
+    color: Optional[str] = Query(None, description="Filter by color")
+):
+    """
+    Get all products with optional filters
 
+    Query Parameters:
+    - category: Filter by category (optional)
+    - color: Filter by color (optional)
+
+    Returns:
+        JSON with filtered products
+    """
+    products = fetch_products_from_sheet()
+
+    # Apply category filter
+    if category:
+        products = [p for p in products if p.get('category', '').lower() == category.lower()]
+
+    # Apply color filter
+    if color:
+        products = [p for p in products if p.get('color', '').lower() == color.lower()]
+
+    return {
+        "products": products,
+        "count": len(products),
+        "filters": {
+            "category": category,
+            "color": color
+        }
+    }
 
 
 @router.get("/api/products/search")
