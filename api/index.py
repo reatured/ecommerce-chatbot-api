@@ -91,14 +91,99 @@ async def _process_anthropic_chat(
     # Streaming mode
     async def generate():
         try:
+            message_content_started = False
+            message_content_ended = False
+            buffer = ""
+            emitted_buffer = ""  # Track what we've already emitted
+            message_start_pos = -1
+            message_end_pos = -1
+
             with client.messages.stream(**request_params) as stream:
                 for text in stream.text_stream:
-                    chunk_data = {
-                        "type": "content",
-                        "delta": text,
-                        "index": 0
-                    }
-                    yield f"data: {json.dumps(chunk_data)}\n\n"
+                    buffer += text
+
+                    # Detect when we've found the complete "message": " pattern
+                    if not message_content_started:
+                        # Try pattern with space: "message": "
+                        pattern1 = '"message": "'
+                        pattern1_idx = buffer.find(pattern1)
+
+                        if pattern1_idx != -1:
+                            # Found complete pattern "message": "
+                            message_start_pos = pattern1_idx + len(pattern1)
+                            message_content_started = True
+
+                            # Emit everything up to and including "message": " as metadata
+                            metadata_to_emit = buffer[len(emitted_buffer):message_start_pos]
+                            if metadata_to_emit:
+                                yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
+                                emitted_buffer = buffer[:message_start_pos]
+                            continue
+
+                        # Try pattern without space: "message":"
+                        pattern2 = '"message":"'
+                        pattern2_idx = buffer.find(pattern2)
+
+                        if pattern2_idx != -1:
+                            # Found complete pattern "message":"
+                            message_start_pos = pattern2_idx + len(pattern2)
+                            message_content_started = True
+
+                            # Emit everything up to and including "message":" as metadata
+                            metadata_to_emit = buffer[len(emitted_buffer):message_start_pos]
+                            if metadata_to_emit:
+                                yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
+                                emitted_buffer = buffer[:message_start_pos]
+                            continue
+
+                        # Pattern not found yet, but might be split across chunks
+                        # Only emit if we have enough buffer and pattern won't be split
+                        safe_to_emit = len(buffer) - len(emitted_buffer) > 15  # "message": " is 12 chars
+                        if safe_to_emit:
+                            # Emit all but last 15 chars as metadata (keep buffer for pattern detection)
+                            metadata_to_emit = buffer[len(emitted_buffer):-15]
+                            if metadata_to_emit:
+                                yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
+                                emitted_buffer += metadata_to_emit
+                        continue
+
+                    # Detect when message content ends (closing quote)
+                    if message_content_started and not message_content_ended:
+                        # Look for unescaped closing quote
+                        content_so_far = buffer[message_start_pos:]
+
+                        for i, char in enumerate(content_so_far):
+                            if char == '"' and (i == 0 or content_so_far[i-1] != '\\'):
+                                # Found the closing quote
+                                message_end_pos = message_start_pos + i
+                                message_content_ended = True
+
+                                # Emit content (without the closing quote)
+                                content_to_emit = buffer[len(emitted_buffer):message_end_pos]
+                                if content_to_emit:
+                                    yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
+                                    emitted_buffer = buffer[:message_end_pos]
+
+                                # Emit the closing quote and anything after as metadata
+                                metadata_to_emit = buffer[message_end_pos:len(buffer)]
+                                if metadata_to_emit:
+                                    yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
+                                    emitted_buffer = buffer
+                                break
+
+                        if not message_content_ended:
+                            # Haven't found closing quote yet, emit content so far
+                            content_to_emit = buffer[len(emitted_buffer):]
+                            if content_to_emit:
+                                yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
+                                emitted_buffer = buffer
+
+                    # After message ended, everything is metadata
+                    elif message_content_ended:
+                        metadata_to_emit = buffer[len(emitted_buffer):]
+                        if metadata_to_emit:
+                            yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
+                            emitted_buffer = buffer
 
                 # Get the final response message
                 final_message = stream.get_final_message()

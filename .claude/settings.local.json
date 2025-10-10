@@ -16,7 +16,8 @@
       "Bash(git push:*)",
       "Bash(git add:*)",
       "Read(//Users/lingyizhou/Documents/**)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []
