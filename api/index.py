@@ -30,6 +30,85 @@ app.add_middleware(
 app.include_router(products_router)
 
 
+# Tool definitions for Claude
+TOOLS = [
+    {
+        "name": "search_products",
+        "description": "Search for products by query, with optional category filter. Returns list of matching products.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (product type, features, brand, color, etc.)"
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["car", "backpack"],
+                    "description": "Optional category filter"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "get_product_details",
+        "description": "Get detailed information about a specific product by ID",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "integer",
+                    "description": "The product ID"
+                }
+            },
+            "required": ["product_id"]
+        }
+    }
+]
+
+# Unified system prompt for single agent
+UNIFIED_SYSTEM_PROMPT = """You are an AI shopping assistant for an e-commerce platform specializing in cars and backpacks.
+
+Core Capabilities:
+1. **General Conversation**: Chat naturally, answer questions, be helpful
+2. **Product Recommendations**: Use tools to search products when users express shopping intent
+3. **Image-Based Search**: Identify products from uploaded images and find similar items
+
+Available Tools:
+- search_products(query, category?) - Search product catalog
+- get_product_details(product_id) - Get detailed product info
+
+Product Catalog:
+- Categories: "car" and "backpack"
+- Each product has: id, name, brand, price, color, description, image_url, tags
+
+Response Guidelines:
+1. **Always respond conversationally first**, then use tools if needed
+2. **When showing products**, format your response as JSON:
+   {
+     "message": "Your conversational message here",
+     "products": [array of products from tool results],
+     "actions": ["Quick action 1", "Quick action 2"]
+   }
+3. **For images**: Identify the product type, extract features (color, brand, style), then search for similar items
+4. **Be proactive**: If user says "find backpacks", use search_products tool
+5. **Natural flow**: Don't mention tools/stages to the user - just use them seamlessly
+
+Examples:
+- User: "Hi" → Respond conversationally (no tools)
+- User: "Find me a backpack" → Use search_products(query="backpack")
+- User: "Show me red cars under $30k" → Use search_products(query="red under 30000", category="car")
+- User: [uploads image] → Identify product, use search_products to find similar
+
+Important:
+- ONLY use tools when you need product data
+- For general questions, just respond normally
+- Format product responses as JSON when showing products
+- Keep conversational and friendly
+"""
+
+
 
 
 # Health check endpoint
@@ -225,6 +304,178 @@ async def _process_anthropic_chat(
     )
 
 
+# Helper function for Anthropic chat processing with tool use
+async def _process_anthropic_chat_with_tools(
+    client,
+    messages: list,
+    model: str,
+    max_tokens: int,
+    stream: bool,
+    system: Optional[str] = None
+):
+    """
+    Internal helper to process Anthropic chat requests with tool use support
+    Returns either JSONResponse or StreamingResponse
+
+    Args:
+        client: Anthropic client instance
+        messages: List of message dicts with 'role' and 'content' keys
+        model: Model name to use
+        max_tokens: Maximum tokens for response
+        stream: Whether to stream the response
+        system: Optional system prompt
+    """
+    from fastapi.responses import JSONResponse
+    from api.products import fetch_products_from_sheet
+
+    # Use unified system prompt if not provided
+    if not system:
+        system = UNIFIED_SYSTEM_PROMPT
+
+    # Prepare request parameters
+    request_params = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+        "tools": TOOLS
+    }
+
+    # Initial request with tools
+    response = client.messages.create(**request_params)
+
+    # Tool use loop
+    while response.stop_reason == "tool_use":
+        # Extract tool calls
+        tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
+
+        # Execute tools
+        tool_results = []
+        for tool_use in tool_use_blocks:
+            if tool_use.name == "search_products":
+                # Get all products
+                products = fetch_products_from_sheet()
+
+                # Apply filters
+                query = tool_use.input.get("query", "").lower()
+                category = tool_use.input.get("category")
+
+                # Filter by category
+                if category:
+                    products = [p for p in products if p.get("category", "").lower() == category.lower()]
+
+                # Search in fields
+                if query:
+                    filtered = []
+                    for p in products:
+                        searchable = " ".join([
+                            str(p.get("name", "")),
+                            str(p.get("description", "")),
+                            str(p.get("brand", "")),
+                            str(p.get("tags", "")),
+                            str(p.get("color", ""))
+                        ]).lower()
+                        if query in searchable:
+                            filtered.append(p)
+                    products = filtered
+
+                # Limit to top 10
+                result_content = json.dumps(products[:10])
+
+            elif tool_use.name == "get_product_details":
+                products = fetch_products_from_sheet()
+                product_id = tool_use.input.get("product_id")
+                product = next((p for p in products if p.get("id") == product_id), None)
+                result_content = json.dumps(product) if product else json.dumps({"error": "Product not found"})
+
+            else:
+                result_content = json.dumps({"error": "Unknown tool"})
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": result_content
+            })
+
+        # Add assistant response and tool results to conversation
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+        # Continue conversation
+        response = client.messages.create(**request_params)
+
+    # Return final response
+    if stream:
+        # For streaming, we need to handle the final response
+        # After tool use completes, stream the final text response
+        async def generate_final():
+            try:
+                # Stream the final response text
+                final_text = response.content[0].text if response.content else ""
+
+                # Parse the response to separate message and metadata
+                message_content_started = False
+                message_content_ended = False
+                buffer = final_text
+
+                # Try to find JSON structure
+                if buffer.strip().startswith("{"):
+                    # Likely JSON response with products
+                    try:
+                        json_obj = json.loads(buffer)
+                        message_text = json_obj.get("message", "")
+
+                        # Stream the message part
+                        yield f"data: {json.dumps({'type': 'content', 'delta': message_text, 'index': 0})}\n\n"
+
+                        # Stream the metadata (products, actions)
+                        metadata = buffer
+                        yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata, 'index': 0})}\n\n"
+                    except json.JSONDecodeError:
+                        # Not valid JSON, stream as regular content
+                        yield f"data: {json.dumps({'type': 'content', 'delta': buffer, 'index': 0})}\n\n"
+                else:
+                    # Regular text response
+                    yield f"data: {json.dumps({'type': 'content', 'delta': buffer, 'index': 0})}\n\n"
+
+                # Send finish reason
+                finish_data = {
+                    "type": "finish",
+                    "finish_reason": response.stop_reason if hasattr(response, 'stop_reason') else "stop"
+                }
+                yield f"data: {json.dumps(finish_data)}\n\n"
+
+                # Send completion message
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+            except Exception as e:
+                error_data = {"type": "error", "message": str(e)}
+                yield f"data: {json.dumps(error_data)}\n\n"
+
+        return StreamingResponse(
+            generate_final(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    else:
+        # Non-streaming mode
+        response_data = {
+            "type": "complete",
+            "content": response.content[0].text if response.content else "",
+            "finish_reason": response.stop_reason if hasattr(response, 'stop_reason') else "stop",
+            "model": response.model if hasattr(response, 'model') else model,
+            "usage": {
+                "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') else None,
+                "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') else None
+            } if hasattr(response, 'usage') else None
+        }
+        return JSONResponse(content=response_data)
+
+
 # Anthropic Chat Endpoint
 @app.post("/api/chat/anthropic/stream")
 async def anthropic_chat_stream(
@@ -234,7 +485,7 @@ async def anthropic_chat_stream(
     system_prompt: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
     image_media_type: Optional[str] = Form("image/jpeg"),
-    model: Optional[str] = Form("claude-3-5-haiku-latest"),
+    model: Optional[str] = Form("claude-3-5-sonnet-latest"),
     max_tokens: Optional[int] = Form(1024),
     stream: Optional[bool] = Form(True)
 ):
@@ -326,8 +577,8 @@ async def anthropic_chat_stream(
         # Use system_prompt if provided, otherwise fall back to system
         final_system_prompt = system_prompt or system
 
-        # Process request using helper function
-        return await _process_anthropic_chat(client, messages, model, max_tokens, stream, final_system_prompt)
+        # Process request using tool-enabled helper function
+        return await _process_anthropic_chat_with_tools(client, messages, model, max_tokens, stream, final_system_prompt)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
