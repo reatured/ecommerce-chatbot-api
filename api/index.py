@@ -134,6 +134,7 @@ async def anthropic_chat_stream(
     message: str = Form(...),
     conversation_history: Optional[str] = Form(None),
     system: Optional[str] = Form(None),
+    system_prompt: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
     image_media_type: Optional[str] = Form("image/jpeg"),
     model: Optional[str] = Form("claude-3-5-haiku-latest"),
@@ -150,6 +151,7 @@ async def anthropic_chat_stream(
     - conversation_history: JSON string of previous messages (optional)
       Format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
     - system: System message to set AI behavior (optional)
+    - system_prompt: Alternative name for system parameter (optional, takes precedence over 'system')
     - image: Image file upload (optional)
     - image_media_type: MIME type of image (default: image/jpeg)
     - model: Claude model to use (default: claude-3-5-haiku-latest)
@@ -224,8 +226,11 @@ async def anthropic_chat_stream(
             "content": current_content
         })
 
+        # Use system_prompt if provided, otherwise fall back to system
+        final_system_prompt = system_prompt or system
+
         # Process request using helper function
-        return await _process_anthropic_chat(client, messages, model, max_tokens, stream, system)
+        return await _process_anthropic_chat(client, messages, model, max_tokens, stream, final_system_prompt)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
