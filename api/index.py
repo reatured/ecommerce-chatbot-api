@@ -29,7 +29,36 @@ app.add_middleware(
 # Include products router
 app.include_router(products_router)
 
+# Default system prompt for the shopping assistant
+DEFAULT_SYSTEM_PROMPT = """You are a helpful AI shopping assistant for an e-commerce store.
 
+PRODUCT CATALOG:
+- We sell backpacks (hiking, school, travel, laptop bags, sports)
+- We sell cars (sedans, SUVs, electric vehicles, luxury, economy)
+
+YOUR CAPABILITIES:
+1. General conversation - Answer questions about yourself and help users
+2. Product recommendations - Help users find products based on text descriptions
+3. Image-based search - When users upload images, analyze them and recommend matching products
+
+RESPONSE GUIDELINES:
+- Be friendly, conversational, and helpful
+- For product questions, provide specific recommendations with names and prices
+- When products are shown in the side panel, reference them by name
+- Ask clarifying questions to understand user needs better
+- **IMPORTANT**: When suggesting quick actions, provide maximum 4 options
+- If you don't have information, be honest about it
+
+EXAMPLES:
+User: "What's your name?"
+You: "I'm your AI shopping assistant! I can help you find backpacks and cars from our catalog."
+
+User: "I need a backpack for hiking"
+You: "Great! I can help with that. What's your budget? And do you need any specific features like waterproofing or laptop storage?"
+
+User: [uploads image]
+You: "I can see this is a [description]. I found several similar products in our catalog - the [product name] at $[price] is very similar!"
+"""
 
 
 # Health check endpoint
@@ -54,6 +83,173 @@ async def root():
             "product_by_id": "Get detailed product information by ID"
         }
     }
+
+
+# Image-based product search helper
+async def analyze_image_and_find_products(image_base64: str, message: str = "") -> dict:
+    """
+    Analyze uploaded image with Claude Vision and find matching products
+
+    Args:
+        image_base64: Base64 encoded image data
+        message: Optional user message accompanying the image
+
+    Returns:
+        Dictionary with products, analysis, category, and features
+    """
+    from anthropic import Anthropic
+    from api.products import fetch_products_from_sheet
+
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    # Step 1: Analyze image with Vision API
+    try:
+        vision_response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_base64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": """Analyze this product image and respond in this EXACT format:
+
+CATEGORY: [car OR backpack - choose one]
+COLOR: [primary color seen in image]
+STYLE: [brief style description]
+FEATURES: [key visible features, comma-separated]
+SEARCH_QUERY: [best keywords to search for similar products]
+
+Example response:
+CATEGORY: backpack
+COLOR: blue
+STYLE: hiking
+FEATURES: large capacity, multiple compartments, padded straps
+SEARCH_QUERY: blue hiking backpack large
+
+If this is not a product image (car or backpack), respond with:
+CATEGORY: none
+COLOR: none
+STYLE: not a product
+FEATURES: none
+SEARCH_QUERY: none"""
+                    }
+                ]
+            }]
+        )
+
+        analysis_text = vision_response.content[0].text
+        print(f"📸 Vision Analysis: {analysis_text}")
+
+    except Exception as e:
+        print(f"❌ Vision API error: {e}")
+        return {
+            "products": [],
+            "analysis": f"Error analyzing image: {str(e)}",
+            "category": None,
+            "features": []
+        }
+
+    # Step 2: Parse the analysis
+    category = None
+    color = None
+    style = None
+    features = []
+    search_query = ""
+
+    for line in analysis_text.strip().split('\n'):
+        line = line.strip()
+        if line.startswith('CATEGORY:'):
+            category = line.split(':', 1)[1].strip().lower()
+        elif line.startswith('COLOR:'):
+            color = line.split(':', 1)[1].strip().lower()
+        elif line.startswith('STYLE:'):
+            style = line.split(':', 1)[1].strip()
+        elif line.startswith('FEATURES:'):
+            features_str = line.split(':', 1)[1].strip()
+            features = [f.strip() for f in features_str.split(',')]
+        elif line.startswith('SEARCH_QUERY:'):
+            search_query = line.split(':', 1)[1].strip()
+
+    # Step 3: Check if it's a valid product
+    if category == 'none' or category not in ['car', 'backpack']:
+        return {
+            "products": [],
+            "analysis": analysis_text,
+            "category": None,
+            "features": features,
+            "message": "I can see this image, but it doesn't appear to be a car or backpack product. Please upload an image of a car or backpack to search for similar products."
+        }
+
+    # Step 4: Search products
+    try:
+        all_products = fetch_products_from_sheet()
+
+        # Filter by category
+        products = [p for p in all_products if p.get('category', '').lower() == category]
+
+        # Filter by color if detected (and color is valid)
+        if color and color != 'none':
+            color_filtered = [p for p in products if color in p.get('color', '').lower()]
+            if color_filtered:
+                products = color_filtered
+
+        # Rank products by keyword matching
+        if search_query and search_query != 'none':
+            scored_products = []
+            search_terms = search_query.lower().split()
+
+            for product in products:
+                # Build searchable text
+                searchable = ' '.join([
+                    product.get('name', ''),
+                    product.get('description', ''),
+                    product.get('brand', ''),
+                    product.get('tags', ''),
+                    product.get('color', '')
+                ]).lower()
+
+                # Score based on term matches
+                score = sum(1 for term in search_terms if term in searchable)
+
+                if score > 0:
+                    scored_products.append((product, score))
+
+            # Sort by score descending
+            scored_products.sort(key=lambda x: x[1], reverse=True)
+            products = [p[0] for p in scored_products]
+
+        # Limit to top 10
+        products = products[:10]
+
+        return {
+            "products": products,
+            "analysis": analysis_text,
+            "category": category,
+            "color": color,
+            "style": style,
+            "features": features,
+            "search_query": search_query,
+            "count": len(products)
+        }
+
+    except Exception as e:
+        print(f"❌ Product search error: {e}")
+        return {
+            "products": [],
+            "analysis": analysis_text,
+            "category": category,
+            "features": features,
+            "error": f"Error searching products: {str(e)}"
+        }
 
 
 # Helper function for Anthropic chat processing
@@ -292,11 +488,18 @@ async def anthropic_chat_stream(
 
         # Process image input for current message
         img_base64 = None
+        image_search_results = None
+
         if image:
             # File upload
             image_data = await image.read()
             img_base64 = base64.b64encode(image_data).decode('utf-8')
             image_media_type = image.content_type or image_media_type
+
+            # IMPORTANT: Perform image-based product search
+            print("🔍 Performing image-based product search...")
+            image_search_results = await analyze_image_and_find_products(img_base64, message)
+            print(f"✅ Found {image_search_results.get('count', 0)} products matching image")
 
         # Prepare current message content
         if img_base64:
@@ -325,8 +528,37 @@ async def anthropic_chat_stream(
             "content": current_content
         })
 
-        # Use system_prompt if provided, otherwise fall back to system
-        final_system_prompt = system_prompt or system
+        # Use system_prompt if provided, otherwise use default
+        final_system_prompt = system_prompt or system or DEFAULT_SYSTEM_PROMPT
+
+        # If image search found products, add context to system prompt
+        if image_search_results and image_search_results.get('products'):
+            products = image_search_results['products']
+            category = image_search_results.get('category', 'products')
+            color = image_search_results.get('color', '')
+
+            product_context = f"""
+
+IMAGE ANALYSIS RESULTS:
+The user uploaded an image of a {color + ' ' if color else ''}{category}.
+I found {len(products)} matching products in our catalog:
+
+"""
+            for i, p in enumerate(products[:5], 1):
+                product_context += f"{i}. {p['name']} by {p['brand']} - ${p['price']}"
+                if p.get('color'):
+                    product_context += f" ({p['color']})"
+                product_context += "\n"
+
+            if len(products) > 5:
+                product_context += f"\n...and {len(products) - 5} more similar products.\n"
+
+            product_context += """
+IMPORTANT: The user can see these products in the side panel. Reference them by name in your response.
+Recommend specific products from this list and mention their prices.
+"""
+
+            final_system_prompt = (final_system_prompt or "") + product_context
 
         # Process request using helper function
         return await _process_anthropic_chat(client, messages, model, max_tokens, stream, final_system_prompt)
