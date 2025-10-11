@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import base64
 from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
@@ -56,7 +57,6 @@ RESPONSE GUIDELINES:
 - Ask clarifying questions to understand user needs better
 - **IMPORTANT**: When suggesting quick actions, provide maximum 4 options
 - **ALWAYS provide a response** - never leave your message empty
-- Respond naturally in plain text - you do not need to format responses as JSON
 
 HANDLING "NO RESULTS FOUND":
 When search_products or image analysis returns 0 results:
@@ -123,7 +123,7 @@ TOOLS = [
 
 
 # Health check endpoint
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
         "status": "ok",
@@ -436,6 +436,72 @@ def execute_tool(tool_name: str, tool_input: dict) -> dict:
     except Exception as e:
         print(f"❌ Tool execution error for {tool_name}: {e}")
         return {"error": f"Error executing tool: {str(e)}"}
+
+
+def validate_and_fix_json_response(response_text: str) -> tuple[dict | None, str]:
+    """
+    Validate and attempt to fix JSON responses from Claude.
+
+    Args:
+        response_text: The raw response text from Claude
+
+    Returns:
+        Tuple of (parsed_json_dict_or_None, cleaned_text)
+        - If valid JSON found: (dict, original_text)
+        - If invalid but fixable: (dict, fixed_text)
+        - If unfixable: (None, original_text)
+    """
+    # Try direct parse first
+    try:
+        parsed = json.loads(response_text.strip())
+        if isinstance(parsed, dict) and "message" in parsed:
+            return (parsed, response_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting JSON object from mixed text
+    # Pattern: Look for {...} containing "message" field
+    json_pattern = r'\{[^{}]*?"message"[^{}]*?\}'
+    matches = re.finditer(json_pattern, response_text, re.DOTALL)
+
+    for match in matches:
+        json_str = match.group(0)
+        try:
+            parsed = json.loads(json_str)
+            if isinstance(parsed, dict) and "message" in parsed:
+                print(f"✅ Extracted valid JSON from position {match.start()}-{match.end()}")
+                return (parsed, json_str)
+        except json.JSONDecodeError:
+            continue
+
+    # Try fixing common JSON issues
+    fixed_text = response_text.strip()
+
+    # Fix: Remove markdown code blocks if present
+    if fixed_text.startswith("```json"):
+        fixed_text = re.sub(r'^```json\s*', '', fixed_text)
+        fixed_text = re.sub(r'\s*```$', '', fixed_text)
+        try:
+            parsed = json.loads(fixed_text)
+            if isinstance(parsed, dict):
+                print("✅ Fixed JSON by removing markdown code blocks")
+                return (parsed, fixed_text)
+        except json.JSONDecodeError:
+            pass
+
+    # Fix: Remove trailing commas
+    fixed_text = re.sub(r',\s*([}\]])', r'\1', response_text)
+    try:
+        parsed = json.loads(fixed_text)
+        if isinstance(parsed, dict):
+            print("✅ Fixed JSON by removing trailing commas")
+            return (parsed, fixed_text)
+    except json.JSONDecodeError:
+        pass
+
+    # If all fixes fail, return None
+    print(f"⚠️ Could not extract or fix JSON from response (length: {len(response_text)} chars)")
+    return (None, response_text)
 
 
 # Helper function for Anthropic chat processing
