@@ -40,13 +40,22 @@ YOUR CAPABILITIES:
 1. General conversation - Answer questions about yourself and help users
 2. Product recommendations - Help users find products based on text descriptions
 3. Image-based search - When users upload images, analyze them and recommend matching products
+4. **TOOLS**: You have access to tools to search products and get product details
+
+TOOL USAGE GUIDELINES:
+- Use the `search_products` tool when users ask about products (e.g., "show me backpacks", "find blue cars")
+- Use the `get_product_details` tool when users ask about a specific product by ID
+- **IMPORTANT**: For text-based product queries, ALWAYS use the search_products tool to get actual results
+- Only recommend products that you found via the tools - do NOT make up product names or prices
+- After using tools, reference the actual products found (name, brand, price)
 
 RESPONSE GUIDELINES:
 - Be friendly, conversational, and helpful
-- For product questions, provide specific recommendations with names and prices
+- For product questions, use tools to search, then provide specific recommendations from results
 - When products are shown in the side panel, reference them by name
 - Ask clarifying questions to understand user needs better
 - **IMPORTANT**: When suggesting quick actions, provide maximum 4 options
+- If search returns no results, suggest browsing other categories
 - If you don't have information, be honest about it
 
 EXAMPLES:
@@ -54,11 +63,49 @@ User: "What's your name?"
 You: "I'm your AI shopping assistant! I can help you find backpacks and cars from our catalog."
 
 User: "I need a backpack for hiking"
-You: "Great! I can help with that. What's your budget? And do you need any specific features like waterproofing or laptop storage?"
+You: [Use search_products tool with query="hiking backpack"]
+You: "I found several great hiking backpacks! The [actual product name from search] by [brand] is $[price] and has [features]. Would you like to see more options?"
 
 User: [uploads image]
 You: "I can see this is a [description]. I found several similar products in our catalog - the [product name] at $[price] is very similar!"
 """
+
+# Tool definitions for Anthropic API
+TOOLS = [
+    {
+        "name": "search_products",
+        "description": "Search for products in the catalog by keyword. Searches across product names, descriptions, brands, tags, and colors. Optionally filter by category.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (e.g., 'blue hiking backpack', 'electric car', 'waterproof')"
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optional category filter (e.g., 'car', 'backpack', 'home_appliance')",
+                    "enum": ["car", "backpack", "home_appliance"]
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "get_product_details",
+        "description": "Get detailed information about a specific product by its ID",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "integer",
+                    "description": "The ID of the product to retrieve"
+                }
+            },
+            "required": ["product_id"]
+        }
+    }
+]
 
 
 # Health check endpoint
@@ -252,6 +299,131 @@ SEARCH_QUERY: none"""
         }
 
 
+# Tool execution handler
+def execute_tool(tool_name: str, tool_input: dict) -> dict:
+    """
+    Execute a tool call from the AI and return results
+
+    Args:
+        tool_name: Name of the tool to execute
+        tool_input: Input parameters for the tool
+
+    Returns:
+        Dictionary with tool results
+    """
+    from api.products import fetch_products_from_sheet
+
+    try:
+        if tool_name == "search_products":
+            # Get search parameters
+            query = tool_input.get("query", "")
+            category = tool_input.get("category")
+
+            if not query or len(query.strip()) < 2:
+                return {
+                    "error": "Search query must be at least 2 characters",
+                    "products": []
+                }
+
+            # Fetch all products
+            products = fetch_products_from_sheet()
+
+            # Filter by category if provided
+            if category:
+                products = [p for p in products if p.get('category', '').lower() == category.lower()]
+
+            # Search across multiple fields
+            q_lower = query.lower()
+            results = []
+
+            for product in products:
+                # Build searchable text
+                searchable_text = ' '.join([
+                    product.get('name', ''),
+                    product.get('description', ''),
+                    product.get('brand', ''),
+                    product.get('tags', ''),
+                    product.get('color', '')
+                ]).lower()
+
+                if q_lower in searchable_text:
+                    results.append(product)
+
+            # Limit to top 10 results
+            results = results[:10]
+
+            print(f"🔧 Tool search_products: query='{query}', category={category}, found {len(results)} products")
+
+            # Format results for AI
+            if len(results) == 0:
+                return {
+                    "products": [],
+                    "count": 0,
+                    "message": f"No products found for '{query}'" + (f" in category '{category}'" if category else "")
+                }
+
+            # Return formatted product list
+            return {
+                "products": [
+                    {
+                        "id": p.get("id"),
+                        "name": p.get("name"),
+                        "brand": p.get("brand"),
+                        "price": p.get("price"),
+                        "color": p.get("color"),
+                        "category": p.get("category"),
+                        "description": p.get("description", "")[:200]  # Truncate long descriptions
+                    }
+                    for p in results
+                ],
+                "count": len(results),
+                "query": query,
+                "category": category
+            }
+
+        elif tool_name == "get_product_details":
+            # Get product ID
+            product_id = tool_input.get("product_id")
+
+            if not product_id:
+                return {"error": "Product ID is required"}
+
+            # Fetch all products
+            products = fetch_products_from_sheet()
+
+            # Find product by ID
+            product = next((p for p in products if p.get('id') == product_id), None)
+
+            if not product:
+                return {"error": f"Product with ID {product_id} not found"}
+
+            print(f"🔧 Tool get_product_details: product_id={product_id}, found '{product.get('name')}'")
+
+            # Return full product details
+            return {
+                "product": {
+                    "id": product.get("id"),
+                    "name": product.get("name"),
+                    "brand": product.get("brand"),
+                    "price": product.get("price"),
+                    "color": product.get("color"),
+                    "category": product.get("category"),
+                    "description": product.get("description"),
+                    "tags": product.get("tags"),
+                    "image_url": product.get("image_url"),
+                    "publish_time": product.get("publish_time"),
+                    "selling_quantity": product.get("selling_quantity")
+                }
+            }
+
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    except Exception as e:
+        print(f"❌ Tool execution error for {tool_name}: {e}")
+        return {"error": f"Error executing tool: {str(e)}"}
+
+
 # Helper function for Anthropic chat processing
 async def _process_anthropic_chat(
     client,
@@ -262,7 +434,7 @@ async def _process_anthropic_chat(
     system: Optional[str] = None
 ):
     """
-    Internal helper to process Anthropic chat requests
+    Internal helper to process Anthropic chat requests with tool calling support
     Returns either JSONResponse or StreamingResponse
 
     Args:
@@ -270,35 +442,127 @@ async def _process_anthropic_chat(
     """
     from fastapi.responses import JSONResponse
 
-    # Prepare request parameters
-    request_params = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": messages
-    }
+    # Tool use loop: AI may request tools, we execute them, then AI generates final response
+    max_tool_iterations = 3  # Prevent infinite loops
+    iteration = 0
 
-    # Add system message if provided
-    if system:
-        request_params["system"] = system
+    while iteration < max_tool_iterations:
+        iteration += 1
 
-    # Non-streaming mode
-    if not stream:
-        response = client.messages.create(**request_params)
-
-        # Return complete response
-        response_data = {
-            "type": "complete",
-            "content": response.content[0].text if response.content else "",
-            "finish_reason": response.stop_reason if hasattr(response, 'stop_reason') else "stop",
-            "model": response.model if hasattr(response, 'model') else model,
-            "usage": {
-                "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') else None,
-                "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') else None
-            } if hasattr(response, 'usage') else None
+        # Prepare request parameters
+        request_params = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "tools": TOOLS  # Add tool definitions
         }
-        return JSONResponse(content=response_data)
 
-    # Streaming mode
+        # Add system message if provided
+        if system:
+            request_params["system"] = system
+
+        # Non-streaming mode with tools
+        if not stream:
+            response = client.messages.create(**request_params)
+
+            # Check if AI wants to use tools
+            if response.stop_reason == "tool_use":
+                print(f"🔧 AI requested tool use (iteration {iteration})")
+
+                # Extract tool use blocks
+                tool_results = []
+                for content_block in response.content:
+                    if content_block.type == "tool_use":
+                        tool_name = content_block.name
+                        tool_input = content_block.input
+                        tool_use_id = content_block.id
+
+                        print(f"🔧 Executing tool: {tool_name} with input: {tool_input}")
+
+                        # Execute the tool
+                        tool_result = execute_tool(tool_name, tool_input)
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": json.dumps(tool_result)
+                        })
+
+                # Add assistant message with tool use to history
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content
+                })
+
+                # Add tool results as user message
+                messages.append({
+                    "role": "user",
+                    "content": tool_results
+                })
+
+                # Continue loop to get AI's final response
+                continue
+
+            # No tool use - return final response
+            response_data = {
+                "type": "complete",
+                "content": response.content[0].text if response.content else "",
+                "finish_reason": response.stop_reason if hasattr(response, 'stop_reason') else "stop",
+                "model": response.model if hasattr(response, 'model') else model,
+                "usage": {
+                    "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') else None,
+                    "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') else None
+                } if hasattr(response, 'usage') else None
+            }
+            return JSONResponse(content=response_data)
+
+        # Streaming mode with tools
+        # For streaming, we need to handle tool use BEFORE starting the stream
+        # First, make a non-streaming call to check for tool use
+        check_response = client.messages.create(**request_params)
+
+        # Check if AI wants to use tools
+        if check_response.stop_reason == "tool_use":
+            print(f"🔧 AI requested tool use in streaming mode (iteration {iteration})")
+
+            # Extract tool use blocks
+            tool_results = []
+            for content_block in check_response.content:
+                if content_block.type == "tool_use":
+                    tool_name = content_block.name
+                    tool_input = content_block.input
+                    tool_use_id = content_block.id
+
+                    print(f"🔧 Executing tool: {tool_name} with input: {tool_input}")
+
+                    # Execute the tool
+                    tool_result = execute_tool(tool_name, tool_input)
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": json.dumps(tool_result)
+                    })
+
+            # Add assistant message with tool use to history
+            messages.append({
+                "role": "assistant",
+                "content": check_response.content
+            })
+
+            # Add tool results as user message
+            messages.append({
+                "role": "user",
+                "content": tool_results
+            })
+
+            # Continue loop to get AI's final response (will stream next iteration)
+            continue
+
+        # No tool use needed - break out and stream the response
+        break
+
+    # Now stream the final response (either no tools needed, or tools already executed)
     async def generate():
         try:
             message_content_started = False
