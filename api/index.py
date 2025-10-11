@@ -55,8 +55,18 @@ RESPONSE GUIDELINES:
 - When products are shown in the side panel, reference them by name
 - Ask clarifying questions to understand user needs better
 - **IMPORTANT**: When suggesting quick actions, provide maximum 4 options
-- If search returns no results, suggest browsing other categories
-- If you don't have information, be honest about it
+- **ALWAYS provide a response** - never leave your message empty
+- Respond naturally in plain text - you do not need to format responses as JSON
+
+HANDLING "NO RESULTS FOUND":
+When search_products or image analysis returns 0 results:
+1. Acknowledge what the user was looking for
+2. Politely explain we don't have that product in our catalog
+3. Suggest alternatives from our available categories (backpacks or cars)
+4. Offer to help with something else
+
+Example for no results:
+"I searched for [product] but unfortunately we don't have that in our catalog right now. However, I can help you find great backpacks or cars! What are you interested in?"
 
 EXAMPLES:
 User: "What's your name?"
@@ -65,6 +75,10 @@ You: "I'm your AI shopping assistant! I can help you find backpacks and cars fro
 User: "I need a backpack for hiking"
 You: [Use search_products tool with query="hiking backpack"]
 You: "I found several great hiking backpacks! The [actual product name from search] by [brand] is $[price] and has [features]. Would you like to see more options?"
+
+User: "Do you have books?"
+You: [Use search_products tool with query="books"]
+You: "I searched our catalog but we don't currently sell books. However, we have a great selection of backpacks and cars! Can I help you find something from those categories?"
 
 User: [uploads image]
 You: "I can see this is a [description]. I found several similar products in our catalog - the [product name] at $[price] is very similar!"
@@ -571,6 +585,7 @@ async def _process_anthropic_chat(
             emitted_buffer = ""  # Track what we've already emitted
             message_start_pos = -1
             message_end_pos = -1
+            has_emitted_any_content = False  # NEW: Track if we've sent any content chunks
 
             with client.messages.stream(**request_params) as stream:
                 for text in stream.text_stream:
@@ -637,6 +652,7 @@ async def _process_anthropic_chat(
                                 if content_to_emit:
                                     yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
                                     emitted_buffer = buffer[:message_end_pos]
+                                    has_emitted_any_content = True  # NEW: Mark that we sent content
 
                                 # Emit the closing quote and anything after as metadata
                                 metadata_to_emit = buffer[message_end_pos:len(buffer)]
@@ -651,6 +667,7 @@ async def _process_anthropic_chat(
                             if content_to_emit:
                                 yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
                                 emitted_buffer = buffer
+                                has_emitted_any_content = True  # NEW: Mark that we sent content
 
                     # After message ended, everything is metadata
                     elif message_content_ended:
@@ -661,6 +678,28 @@ async def _process_anthropic_chat(
 
                 # Get the final response message
                 final_message = stream.get_final_message()
+
+                # NEW: HYBRID FALLBACK - If no content was emitted, treat entire buffer as plain text
+                if not has_emitted_any_content and buffer:
+                    print(f"⚠️ FALLBACK: No JSON structure detected, streaming entire response as plain text ({len(buffer)} chars)")
+                    # Send entire buffer as content
+                    yield f"data: {json.dumps({'type': 'content', 'delta': buffer, 'index': 0})}\n\n"
+                    has_emitted_any_content = True
+
+                # NEW: Additional safety check - extract from final_message if still no content
+                if not has_emitted_any_content:
+                    print(f"⚠️ FALLBACK 2: Extracting text from final_message")
+                    if hasattr(final_message, 'content') and final_message.content:
+                        # Extract text from content blocks
+                        text_content = ""
+                        for block in final_message.content:
+                            if hasattr(block, 'text'):
+                                text_content += block.text
+
+                        if text_content:
+                            print(f"✅ Extracted {len(text_content)} chars from final_message")
+                            yield f"data: {json.dumps({'type': 'content', 'delta': text_content, 'index': 0})}\n\n"
+                            has_emitted_any_content = True
 
                 # Send finish reason
                 finish_data = {
