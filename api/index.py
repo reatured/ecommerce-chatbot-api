@@ -39,12 +39,14 @@ async def root():
         "status": "ok",
         "message": "E-commerce Chatbot API is running",
         "endpoints": {
+            "init": "/api/init",
             "anthropic_chat": "/api/chat/anthropic/stream",
             "products_list": "/api/products?category={category}&color={color}",
             "products_search": "/api/products/search?q={query}",
             "product_by_id": "/api/products/{id}"
         },
         "notes": {
+            "init": "Initialize app, wake up backend, get categories for quick actions (call on app load)",
             "anthropic_chat": "Accepts both JSON and multipart/form-data (file uploads)",
             "streaming": "Supports streaming toggle via 'stream' parameter (default: true)",
             "products_list": "Get all products with optional category and color filters",
