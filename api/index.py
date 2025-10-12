@@ -82,6 +82,11 @@ You: "I searched our catalog but we don't currently sell books. However, we have
 
 User: [uploads image]
 You: "I can see this is a [description]. I found several similar products in our catalog - the [product name] at $[price] is very similar!"
+
+**CRITICAL JSON FORMAT REQUIREMENT**:
+If the frontend provides a system prompt with JSON formatting instructions, you MUST follow those instructions EXACTLY.
+After using any tools, your FINAL response MUST be valid JSON matching the requested schema.
+Do NOT return plain text, markdown, or conversational responses when JSON format is requested.
 """
 
 # Tool definitions for Anthropic API
@@ -529,11 +534,11 @@ async def _process_anthropic_chat(
     while iteration < max_tool_iterations:
         iteration += 1
 
-        # Prepare request parameters
+        # Prepare request parameters (updated each iteration with current messages)
         request_params = {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": messages,
+            "messages": messages,  # Always use current messages (may include tool results)
             "tools": TOOLS  # Add tool definitions
         }
 
@@ -574,10 +579,19 @@ async def _process_anthropic_chat(
                     "content": response.content
                 })
 
-                # Add tool results as user message
+                # Add tool results as user message with JSON format reminder
+                tool_results_with_reminder = tool_results.copy()
+
+                # Append JSON format reminder if system prompt contains JSON instructions
+                if system and ("JSON" in system.upper() or "json" in system):
+                    tool_results_with_reminder.append({
+                        "type": "text",
+                        "text": "\n\n🚨 REMINDER: Format your response as valid JSON with these fields: stage, message, summary, product_name, quick_actions. Do NOT return plain text."
+                    })
+
                 messages.append({
                     "role": "user",
-                    "content": tool_results
+                    "content": tool_results_with_reminder
                 })
 
                 # Continue loop to get AI's final response
@@ -630,16 +644,27 @@ async def _process_anthropic_chat(
                 "content": check_response.content
             })
 
-            # Add tool results as user message
+            # Add tool results as user message with JSON format reminder
+            tool_results_with_reminder = tool_results.copy()
+
+            # Append JSON format reminder if system prompt contains JSON instructions
+            if system and ("JSON" in system.upper() or "json" in system):
+                tool_results_with_reminder.append({
+                    "type": "text",
+                    "text": "\n\n🚨 REMINDER: Format your response as valid JSON with these fields: stage, message, summary, product_name, quick_actions. Do NOT return plain text."
+                })
+
             messages.append({
                 "role": "user",
-                "content": tool_results
+                "content": tool_results_with_reminder
             })
 
-            # Continue loop to get AI's final response (will stream next iteration)
+            # Continue loop to get AI's final response (will check for more tools or stream)
             continue
 
-        # No tool use needed - break out and stream the response
+        # No tool use in this check - we can stream the response
+        # But this check_response might be stale, so don't stream it
+        # Instead, break and make a fresh streaming request with updated messages
         break
 
     # Now stream the final response (either no tools needed, or tools already executed)
@@ -653,6 +678,7 @@ async def _process_anthropic_chat(
             message_end_pos = -1
             has_emitted_any_content = False  # NEW: Track if we've sent any content chunks
 
+            # request_params already has the latest messages from the loop
             with client.messages.stream(**request_params) as stream:
                 for text in stream.text_stream:
                     buffer += text
@@ -702,30 +728,40 @@ async def _process_anthropic_chat(
                                 emitted_buffer += metadata_to_emit
                         continue
 
-                    # Detect when message content ends (closing quote)
+                    # Detect when message content ends (closing quote followed by comma)
                     if message_content_started and not message_content_ended:
-                        # Look for unescaped closing quote
+                        # Look for unescaped closing quote followed by comma (marks end of message field in JSON)
+                        # Pattern: ",\s*" (quote, optional whitespace, comma, optional whitespace, quote)
                         content_so_far = buffer[message_start_pos:]
 
-                        for i, char in enumerate(content_so_far):
-                            if char == '"' and (i == 0 or content_so_far[i-1] != '\\'):
-                                # Found the closing quote
-                                message_end_pos = message_start_pos + i
-                                message_content_ended = True
+                        # Search for closing quote followed by comma pattern
+                        for i in range(len(content_so_far)):
+                            # Check if current char is quote
+                            if content_so_far[i] == '"':
+                                # Check if it's escaped
+                                if i > 0 and content_so_far[i-1] == '\\':
+                                    continue
 
-                                # Emit content (without the closing quote)
-                                content_to_emit = buffer[len(emitted_buffer):message_end_pos]
-                                if content_to_emit:
-                                    yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
-                                    emitted_buffer = buffer[:message_end_pos]
-                                    has_emitted_any_content = True  # NEW: Mark that we sent content
+                                # Check if followed by comma (with optional whitespace)
+                                remaining = content_so_far[i+1:].lstrip()
+                                if remaining.startswith(','):
+                                    # Found the closing quote of message field!
+                                    message_end_pos = message_start_pos + i
+                                    message_content_ended = True
 
-                                # Emit the closing quote and anything after as metadata
-                                metadata_to_emit = buffer[message_end_pos:len(buffer)]
-                                if metadata_to_emit:
-                                    yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
-                                    emitted_buffer = buffer
-                                break
+                                    # Emit content (without the closing quote)
+                                    content_to_emit = buffer[len(emitted_buffer):message_end_pos]
+                                    if content_to_emit:
+                                        yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
+                                        emitted_buffer = buffer[:message_end_pos]
+                                        has_emitted_any_content = True
+
+                                    # Emit the closing quote and anything after as metadata
+                                    metadata_to_emit = buffer[message_end_pos:len(buffer)]
+                                    if metadata_to_emit:
+                                        yield f"data: {json.dumps({'type': 'metadata', 'delta': metadata_to_emit, 'index': 0})}\n\n"
+                                        emitted_buffer = buffer
+                                    break
 
                         if not message_content_ended:
                             # Haven't found closing quote yet, emit content so far
@@ -733,7 +769,7 @@ async def _process_anthropic_chat(
                             if content_to_emit:
                                 yield f"data: {json.dumps({'type': 'content', 'delta': content_to_emit, 'index': 0})}\n\n"
                                 emitted_buffer = buffer
-                                has_emitted_any_content = True  # NEW: Mark that we sent content
+                                has_emitted_any_content = True
 
                     # After message ended, everything is metadata
                     elif message_content_ended:
