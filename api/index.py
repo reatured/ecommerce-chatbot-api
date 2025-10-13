@@ -50,6 +50,16 @@ TOOL USAGE GUIDELINES:
 - Only recommend products that you found via the tools - do NOT make up product names or prices
 - After using tools, reference the actual products found (name, brand, price)
 
+RESPONSE FORMAT - **CRITICAL**:
+You MUST respond with valid JSON in this EXACT format:
+{
+  "stage": 0,
+  "message": "Your helpful response here",
+  "summary": "Brief summary",
+  "product_name": "category or empty string",
+  "quick_actions": ["Action 1", "Action 2", "Action 3"]
+}
+
 RESPONSE GUIDELINES:
 - Be friendly, conversational, and helpful
 - For product questions, use tools to search, then provide specific recommendations from results
@@ -57,6 +67,7 @@ RESPONSE GUIDELINES:
 - Ask clarifying questions to understand user needs better
 - **IMPORTANT**: When suggesting quick actions, provide maximum 4 options
 - **ALWAYS provide a response** - never leave your message empty
+- **CRITICAL**: ALWAYS respond in valid JSON format as specified above
 
 HANDLING "NO RESULTS FOUND":
 When search_products or image analysis returns 0 results:
@@ -504,6 +515,80 @@ def validate_and_fix_json_response(response_text: str) -> tuple[dict | None, str
     return (None, response_text)
 
 
+def _validate_response_structure(response_text: str) -> tuple[str, bool]:
+    """
+    Validate and ensure AI response has proper JSON structure.
+
+    Args:
+        response_text: The raw response text from Claude
+
+    Returns:
+        Tuple of (validated_content_string, is_valid_json_boolean)
+        - If valid JSON: returns (json_string, True)
+        - If plain text: wraps in JSON structure and returns (json_string, False)
+    """
+    print(f"\n{'='*70}")
+    print(f"🔍 VALIDATION: Checking response structure")
+    print(f"{'='*70}")
+    print(f"Response length: {len(response_text)} chars")
+    print(f"First 200 chars: {response_text[:200]}")
+    print(f"{'='*70}\n")
+
+    if not response_text or not response_text.strip():
+        # Empty response - create default structure
+        default_response = {
+            "stage": 0,
+            "message": "I apologize, but I couldn't generate a response. Please try again.",
+            "summary": "",
+            "product_name": "",
+            "quick_actions": []
+        }
+        print("⚠️ Empty response, using default structure")
+        return (json.dumps(default_response), True)
+
+    # Try to parse as JSON first
+    parsed_json, cleaned_text = validate_and_fix_json_response(response_text)
+
+    if parsed_json:
+        # Valid JSON structure found
+        # Ensure all required fields exist
+        if "message" not in parsed_json:
+            parsed_json["message"] = cleaned_text
+
+        if "stage" not in parsed_json:
+            parsed_json["stage"] = 0
+
+        if "summary" not in parsed_json:
+            parsed_json["summary"] = ""
+
+        if "product_name" not in parsed_json:
+            parsed_json["product_name"] = ""
+
+        if "quick_actions" not in parsed_json:
+            parsed_json["quick_actions"] = []
+
+        print("✅ Valid JSON structure with all required fields")
+        result_json = json.dumps(parsed_json)
+        print(f"✅ Returning validated JSON ({len(result_json)} chars)")
+        return (result_json, True)
+
+    else:
+        # No valid JSON found - wrap plain text in structure
+        print(f"⚠️ No JSON structure detected, wrapping plain text response ({len(response_text)} chars)")
+        print(f"⚠️ Plain text preview: {response_text[:100]}")
+        wrapped_response = {
+            "stage": 0,
+            "message": response_text.strip(),
+            "summary": "",
+            "product_name": "",
+            "quick_actions": []
+        }
+        result_json = json.dumps(wrapped_response)
+        print(f"✅ Wrapped in JSON structure ({len(result_json)} chars)")
+        print(f"✅ Wrapped JSON preview: {result_json[:200]}")
+        return (result_json, False)
+
+
 # Helper function for Anthropic chat processing
 async def _process_anthropic_chat(
     client,
@@ -584,9 +669,15 @@ async def _process_anthropic_chat(
                 continue
 
             # No tool use - return final response
+            content_text = response.content[0].text if response.content else ""
+
+            # Validate and ensure JSON structure
+            validated_content, is_valid_json = _validate_response_structure(content_text)
+
             response_data = {
                 "type": "complete",
-                "content": response.content[0].text if response.content else "",
+                "content": validated_content,
+                "is_structured": is_valid_json,
                 "finish_reason": response.stop_reason if hasattr(response, 'stop_reason') else "stop",
                 "model": response.model if hasattr(response, 'model') else model,
                 "usage": {
