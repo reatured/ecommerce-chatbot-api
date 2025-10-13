@@ -33,22 +33,25 @@ app.include_router(products_router)
 # Default system prompt for the shopping assistant
 DEFAULT_SYSTEM_PROMPT = """You are a helpful AI shopping assistant for an e-commerce store.
 
-PRODUCT CATALOG:
-- We sell backpacks (hiking, school, travel, laptop bags, sports)
-- We sell cars (sedans, SUVs, electric vehicles, luxury, economy)
-
 YOUR CAPABILITIES:
 1. General conversation - Answer questions about yourself and help users
-2. Product recommendations - Help users find products based on text descriptions
-3. Image-based search - When users upload images, analyze them and recommend matching products
-4. **TOOLS**: You have access to tools to search products and get product details
+2. Product search and recommendations - Use tools to find and suggest products
+3. Image-based search - Analyze uploaded images and recommend matching products
+4. Dynamic metadata discovery - Use get_product_metadata to see available options before making suggestions
+5. Filter management - Use filter_products to refine search results
 
-TOOL USAGE GUIDELINES:
-- Use the `search_products` tool when users ask about products (e.g., "show me backpacks", "find blue cars")
-- Use the `get_product_details` tool when users ask about a specific product by ID
-- **IMPORTANT**: For text-based product queries, ALWAYS use the search_products tool to get actual results
-- Only recommend products that you found via the tools - do NOT make up product names or prices
-- After using tools, reference the actual products found (name, brand, price)
+TOOLS AVAILABLE:
+- search_products: Search by keywords across product names, descriptions, brands, tags, colors
+- get_product_details: Get detailed information about a specific product by ID
+- get_product_metadata: Discover available fields or get unique values for any field (category, color, brand, etc.)
+- filter_products: Apply or remove filters to refine product search results
+
+TOOL USAGE BEST PRACTICES:
+- **BEFORE suggesting quick actions**: Use get_product_metadata to check what categories/colors/brands actually exist
+- **For product searches**: Use search_products with actual keywords
+- **To narrow results**: Use filter_products with specific field-value pairs
+- **To expand results**: Use filter_products with null values to remove filters
+- Only recommend products found via tools - never make up product names or prices
 
 RESPONSE FORMAT - **CRITICAL**:
 You MUST respond with valid JSON in this EXACT format:
@@ -57,42 +60,49 @@ You MUST respond with valid JSON in this EXACT format:
   "message": "Your helpful response here",
   "summary": "Brief summary",
   "product_name": "category or empty string",
-  "quick_actions": ["Action 1", "Action 2", "Action 3"]
+  "quick_actions": ["Action 1", "Action 2", "Action 3"],
+  "active_filters": {"color": "blue", "brand": "Nike"}
+}
+
+**IMPORTANT - Product Display Rules:**
+- **stage: 1** - MUST be set when you find products via tools (search_products, filter_products, etc.)
+  - The frontend displays the product panel ONLY when stage is 1
+  - If you found products and want users to see them, set stage to 1
+- **product_name** - MUST contain the search term when products are found
+  - This triggers the frontend to fetch and display products
+  - Example: If searching for "sedans", set product_name to "sedan" or "family sedan"
+- **active_filters** - Include when you use filter_products to inform the frontend of active filters
+- **quick_actions** - Maximum 4 options; use get_product_metadata to ensure they link to real products
+- **message** - Your conversational response to the user
+- Always provide valid JSON
+
+**Example - When AI finds products:**
+User: "Show me family sedans"
+AI uses search_products tool and finds 3 sedans
+Correct response:
+{
+  "stage": 1,
+  "message": "I found 3 sedan options that might suit your family's needs. Check out the panel on the right!",
+  "product_name": "sedan",
+  "quick_actions": ["Electric Sedans", "Luxury Sedans", "Budget Friendly", "View All Cars"]
 }
 
 RESPONSE GUIDELINES:
 - Be friendly, conversational, and helpful
-- For product questions, use tools to search, then provide specific recommendations from results
-- When products are shown in the side panel, reference them by name
-- Ask clarifying questions to understand user needs better
-- **IMPORTANT**: When suggesting quick actions, provide maximum 4 options
-- **ALWAYS provide a response** - never leave your message empty
-- **CRITICAL**: ALWAYS respond in valid JSON format as specified above
+- Use tools to get real data before making recommendations
+- Reference products by name when they appear in the side panel
+- Ask clarifying questions to understand user needs
+- Maximum 4 quick action options
+- Never leave message field empty
 
-HANDLING "NO RESULTS FOUND":
-When search_products or image analysis returns 0 results:
+HANDLING NO RESULTS:
+When tools return 0 results:
 1. Acknowledge what the user was looking for
-2. Politely explain we don't have that product in our catalog
-3. Suggest alternatives from our available categories (backpacks or cars)
-4. Offer to help with something else
+2. Explain the product isn't available
+3. Offer to broaden the search by removing filters or suggest other categories
+4. Use get_product_metadata to suggest actual alternatives
 
-Example for no results:
-"I searched for [product] but unfortunately we don't have that in our catalog right now. However, I can help you find great backpacks or cars! What are you interested in?"
-
-EXAMPLES:
-User: "What's your name?"
-You: "I'm your AI shopping assistant! I can help you find backpacks and cars from our catalog."
-
-User: "I need a backpack for hiking"
-You: [Use search_products tool with query="hiking backpack"]
-You: "I found several great hiking backpacks! The [actual product name from search] by [brand] is $[price] and has [features]. Would you like to see more options?"
-
-User: "Do you have books?"
-You: [Use search_products tool with query="books"]
-You: "I searched our catalog but we don't currently sell books. However, we have a great selection of backpacks and cars! Can I help you find something from those categories?"
-
-User: [uploads image]
-You: "I can see this is a [description]. I found several similar products in our catalog - the [product name] at $[price] is very similar!"
+Example: "I found no blue Nike cars. Let me remove the brand filter to show you all blue cars. Or would you like to see cars in other colors?"
 """
 
 # Tool definitions for Anthropic API
@@ -128,6 +138,43 @@ TOOLS = [
                 }
             },
             "required": ["product_id"]
+        }
+    },
+    {
+        "name": "get_product_metadata",
+        "description": "Discover available product fields/properties or get unique values for any specific field. Use this to see what metadata is available before suggesting filters or quick actions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "description": "Product field to analyze (e.g., 'category', 'color', 'brand', 'tags'). Leave empty to see all available fields."
+                },
+                "category_filter": {
+                    "type": "string",
+                    "description": "Optional category to filter products first (e.g., 'car', 'backpack')"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "filter_products",
+        "description": "Apply or remove filters on product fields to refine search results. Returns filtered products and current filter state.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "object",
+                    "description": "Key-value pairs of field names and desired values (e.g., {'color': 'blue', 'brand': 'Nike'}). Set value to null to remove a specific filter."
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "remove", "replace"],
+                    "description": "How to apply filters: 'add' keeps existing filters and adds new ones, 'remove' removes specified filters, 'replace' replaces all filters with new ones. Default: 'replace'"
+                }
+            },
+            "required": ["filters"]
         }
     }
 ]
@@ -439,6 +486,84 @@ def execute_tool(tool_name: str, tool_input: dict) -> dict:
                     "publish_time": product.get("publish_time"),
                     "selling_quantity": product.get("selling_quantity")
                 }
+            }
+
+        elif tool_name == "get_product_metadata":
+            # Get metadata parameters
+            field = tool_input.get("field")
+            category_filter = tool_input.get("category_filter")
+
+            # Fetch all products
+            products = fetch_products_from_sheet()
+
+            # Import the helper function
+            from api.products import get_field_metadata
+
+            # Get metadata
+            metadata = get_field_metadata(products, field, category_filter)
+
+            print(f"🔧 Tool get_product_metadata: field='{field}', category_filter={category_filter}")
+            if field:
+                print(f"   Found {metadata.get('unique_count', 0)} unique values for '{field}'")
+            else:
+                print(f"   Available fields: {metadata.get('available_fields', [])}")
+
+            return metadata
+
+        elif tool_name == "filter_products":
+            # Get filter parameters
+            filters = tool_input.get("filters", {})
+            action = tool_input.get("action", "replace")
+
+            if not isinstance(filters, dict):
+                return {"error": "Filters must be a dictionary"}
+
+            # Fetch all products
+            products = fetch_products_from_sheet()
+
+            # Apply filters
+            filtered_products = products.copy()
+            active_filters = {}
+
+            for field, value in filters.items():
+                # Skip null values (they mean "remove filter")
+                if value is None:
+                    continue
+
+                # Apply filter
+                active_filters[field] = value
+                value_lower = str(value).lower()
+
+                # Filter products where field contains the value
+                filtered_products = [
+                    p for p in filtered_products
+                    if p.get(field) and value_lower in str(p.get(field, '')).lower()
+                ]
+
+            # Limit to top 20 results
+            filtered_products = filtered_products[:20]
+
+            print(f"🔧 Tool filter_products: filters={filters}, action={action}")
+            print(f"   Active filters: {active_filters}")
+            print(f"   Found {len(filtered_products)} matching products")
+
+            # Return formatted results
+            return {
+                "products": [
+                    {
+                        "id": p.get("id"),
+                        "name": p.get("name"),
+                        "brand": p.get("brand"),
+                        "price": p.get("price"),
+                        "color": p.get("color"),
+                        "category": p.get("category"),
+                        "description": p.get("description", "")[:200]  # Truncate
+                    }
+                    for p in filtered_products
+                ],
+                "count": len(filtered_products),
+                "active_filters": active_filters,
+                "message": f"Found {len(filtered_products)} products" + (f" with filters: {active_filters}" if active_filters else "")
             }
 
         else:

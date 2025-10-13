@@ -231,6 +231,84 @@ async def get_product_by_id(product_id: int):
     return product
 
 
+def get_field_metadata(products: List[Dict], field: str = None, category_filter: str = None) -> Dict:
+    """
+    Dynamically extract metadata for any product field
+
+    Args:
+        products: List of product dictionaries
+        field: Specific field to analyze (e.g., 'color', 'brand'). If None, returns all available fields
+        category_filter: Optional category to filter products first
+
+    Returns:
+        Dictionary with field metadata
+        - If field is None: {"available_fields": [...], "field_types": {...}}
+        - If field specified: {"field": "color", "values": [{"value": "red", "count": 12}, ...], "total_products": 50}
+    """
+    # Apply category filter if provided
+    if category_filter:
+        products = [p for p in products if p.get('category', '').lower() == category_filter.lower()]
+
+    # If no field specified, return available fields
+    if not field:
+        # Get all keys from first product (assumes consistent schema)
+        if products:
+            sample_product = products[0]
+            available_fields = list(sample_product.keys())
+
+            # Determine field types
+            field_types = {}
+            for key in available_fields:
+                sample_value = sample_product.get(key)
+                if isinstance(sample_value, (int, float)):
+                    field_types[key] = "numeric"
+                else:
+                    field_types[key] = "categorical"
+
+            return {
+                "available_fields": available_fields,
+                "field_types": field_types,
+                "total_products": len(products)
+            }
+        else:
+            return {
+                "available_fields": [],
+                "field_types": {},
+                "total_products": 0
+            }
+
+    # Extract unique values for the specified field
+    value_counts = {}
+    for product in products:
+        value = product.get(field, '')
+        if value:
+            # Handle comma-separated values (e.g., tags)
+            if ',' in str(value):
+                # Split and count each individual value
+                for v in str(value).split(','):
+                    v = v.strip()
+                    if v:
+                        value_counts[v] = value_counts.get(v, 0) + 1
+            else:
+                # Single value
+                value_str = str(value).strip()
+                if value_str:
+                    value_counts[value_str] = value_counts.get(value_str, 0) + 1
+
+    # Convert to list of dictionaries sorted by count
+    values_list = [
+        {"value": value, "count": count}
+        for value, count in sorted(value_counts.items(), key=lambda x: x[1], reverse=True)
+    ]
+
+    return {
+        "field": field,
+        "values": values_list,
+        "total_products": len(products),
+        "unique_count": len(values_list)
+    }
+
+
 @router.get("/api/init")
 async def initialize_app():
     """
