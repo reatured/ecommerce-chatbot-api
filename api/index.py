@@ -30,80 +30,22 @@ app.add_middleware(
 # Include products router
 app.include_router(products_router)
 
-# Default system prompt for the shopping assistant
-DEFAULT_SYSTEM_PROMPT = """You are a helpful AI shopping assistant for an e-commerce store.
+# ============================================================================
+# IMPORTANT: DO NOT ADD A DEFAULT_SYSTEM_PROMPT HERE
+# ============================================================================
+# The frontend ALWAYS sends its own comprehensive system prompt via the
+# 'system_prompt' parameter in the API request. Adding a DEFAULT_SYSTEM_PROMPT
+# here will NEVER be used in practice (frontend overrides it) and only causes
+# confusion during development.
+#
+# The authoritative system prompt is defined in:
+#   frontend/src/config/prompts.ts -> getSystemPrompt()
+#
+# If you need to modify the AI's behavior, update the frontend prompt file.
+# ============================================================================
 
-YOUR CAPABILITIES:
-1. General conversation - Answer questions about yourself and help users
-2. Product search and recommendations - Use tools to find and suggest products
-3. Image-based search - Analyze uploaded images and recommend matching products
-4. Dynamic metadata discovery - Use get_product_metadata to see available options before making suggestions
-5. Filter management - Use filter_products to refine search results
-
-TOOLS AVAILABLE:
-- search_products: Search by keywords across product names, descriptions, brands, tags, colors
-- get_product_details: Get detailed information about a specific product by ID
-- get_product_metadata: Discover available fields or get unique values for any field (category, color, brand, etc.)
-- filter_products: Apply or remove filters to refine product search results
-
-TOOL USAGE BEST PRACTICES:
-- **BEFORE suggesting quick actions**: Use get_product_metadata to check what categories/colors/brands actually exist
-- **For product searches**: Use search_products with actual keywords
-- **To narrow results**: Use filter_products with specific field-value pairs
-- **To expand results**: Use filter_products with null values to remove filters
-- Only recommend products found via tools - never make up product names or prices
-
-RESPONSE FORMAT - **CRITICAL**:
-You MUST respond with valid JSON in this EXACT format:
-{
-  "stage": 0,
-  "message": "Your helpful response here",
-  "summary": "Brief summary",
-  "product_name": "category or empty string",
-  "quick_actions": ["Action 1", "Action 2", "Action 3"],
-  "active_filters": {"color": "blue", "brand": "Nike"}
-}
-
-**IMPORTANT - Product Display Rules:**
-- **stage: 1** - MUST be set when you find products via tools (search_products, filter_products, etc.)
-  - The frontend displays the product panel ONLY when stage is 1
-  - If you found products and want users to see them, set stage to 1
-- **product_name** - MUST contain the search term when products are found
-  - This triggers the frontend to fetch and display products
-  - Example: If searching for "sedans", set product_name to "sedan" or "family sedan"
-- **active_filters** - Include when you use filter_products to inform the frontend of active filters
-- **quick_actions** - Maximum 4 options; use get_product_metadata to ensure they link to real products
-- **message** - Your conversational response to the user
-- Always provide valid JSON
-
-**Example - When AI finds products:**
-User: "Show me family sedans"
-AI uses search_products tool and finds 3 sedans
-Correct response:
-{
-  "stage": 1,
-  "message": "I found 3 sedan options that might suit your family's needs. Check out the panel on the right!",
-  "product_name": "sedan",
-  "quick_actions": ["Electric Sedans", "Luxury Sedans", "Budget Friendly", "View All Cars"]
-}
-
-RESPONSE GUIDELINES:
-- Be friendly, conversational, and helpful
-- Use tools to get real data before making recommendations
-- Reference products by name when they appear in the side panel
-- Ask clarifying questions to understand user needs
-- Maximum 4 quick action options
-- Never leave message field empty
-
-HANDLING NO RESULTS:
-When tools return 0 results:
-1. Acknowledge what the user was looking for
-2. Explain the product isn't available
-3. Offer to broaden the search by removing filters or suggest other categories
-4. Use get_product_metadata to suggest actual alternatives
-
-Example: "I found no blue Nike cars. Let me remove the brand filter to show you all blue cars. Or would you like to see cars in other colors?"
-"""
+# Empty fallback (should never be used in practice)
+DEFAULT_SYSTEM_PROMPT = ""
 
 # Tool definitions for Anthropic API
 TOOLS = [
@@ -662,10 +604,9 @@ def _validate_response_structure(response_text: str) -> tuple[str, bool]:
     if not response_text or not response_text.strip():
         # Empty response - create default structure
         default_response = {
-            "stage": 0,
             "message": "I apologize, but I couldn't generate a response. Please try again.",
-            "summary": "",
-            "product_name": "",
+            "product_category_decided": False,
+            "category_name": "",
             "quick_actions": []
         }
         print("⚠️ Empty response, using default structure")
@@ -680,14 +621,11 @@ def _validate_response_structure(response_text: str) -> tuple[str, bool]:
         if "message" not in parsed_json:
             parsed_json["message"] = cleaned_text
 
-        if "stage" not in parsed_json:
-            parsed_json["stage"] = 0
+        if "product_category_decided" not in parsed_json:
+            parsed_json["product_category_decided"] = False
 
-        if "summary" not in parsed_json:
-            parsed_json["summary"] = ""
-
-        if "product_name" not in parsed_json:
-            parsed_json["product_name"] = ""
+        if "category_name" not in parsed_json:
+            parsed_json["category_name"] = ""
 
         if "quick_actions" not in parsed_json:
             parsed_json["quick_actions"] = []
@@ -702,10 +640,9 @@ def _validate_response_structure(response_text: str) -> tuple[str, bool]:
         print(f"⚠️ No JSON structure detected, wrapping plain text response ({len(response_text)} chars)")
         print(f"⚠️ Plain text preview: {response_text[:100]}")
         wrapped_response = {
-            "stage": 0,
             "message": response_text.strip(),
-            "summary": "",
-            "product_name": "",
+            "product_category_decided": False,
+            "category_name": "",
             "quick_actions": []
         }
         result_json = json.dumps(wrapped_response)
@@ -744,7 +681,8 @@ async def _process_anthropic_chat(
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
-            "tools": TOOLS  # Add tool definitions
+            "tools": TOOLS,  # Add tool definitions
+            "response_format": {"type": "json_object"}  # Force valid JSON output only
         }
 
         # Add system message if provided
@@ -1018,13 +956,12 @@ async def anthropic_chat_stream(
     image: Optional[UploadFile] = File(None),
     image_media_type: Optional[str] = Form("image/jpeg"),
     model: Optional[str] = Form("claude-3-5-haiku-latest"),
-    max_tokens: Optional[int] = Form(1024),
-    stream: Optional[bool] = Form(True)
+    max_tokens: Optional[int] = Form(1024)
 ):
     """
     Chat responses from Anthropic API with optional image support and conversation history.
     Accepts multipart/form-data with file upload.
-    Supports both streaming and non-streaming modes via 'stream' parameter.
+    Returns non-streaming JSON responses.
 
     Parameters:
     - message: User message text (required)
@@ -1036,7 +973,6 @@ async def anthropic_chat_stream(
     - image_media_type: MIME type of image (default: image/jpeg)
     - model: Claude model to use (default: claude-3-5-haiku-latest)
     - max_tokens: Maximum tokens in response (default: 1024)
-    - stream: Enable streaming mode (default: true)
     """
     try:
         from anthropic import Anthropic
@@ -1145,8 +1081,8 @@ Recommend specific products from this list and mention their prices.
 
             final_system_prompt = (final_system_prompt or "") + product_context
 
-        # Process request using helper function
-        return await _process_anthropic_chat(client, messages, model, max_tokens, stream, final_system_prompt)
+        # Process request using helper function (hardcoded to non-streaming mode)
+        return await _process_anthropic_chat(client, messages, model, max_tokens, False, final_system_prompt)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
