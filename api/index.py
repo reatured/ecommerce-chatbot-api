@@ -44,8 +44,26 @@ app.include_router(products_router)
 # If you need to modify the AI's behavior, update the frontend prompt file.
 # ============================================================================
 
-# Empty fallback (should never be used in practice)
-DEFAULT_SYSTEM_PROMPT = ""
+# Default system prompt for testing via API docs
+DEFAULT_SYSTEM_PROMPT = """You are a friendly AI shopping assistant helping users find products.
+
+IMPORTANT: You must respond with a JSON object in the following format:
+{
+  "product_category_decided": <true/false>,
+  "message": "your response message here",
+  "summary": "key information in minimal words",
+  "category_name": "product category being discussed (e.g., 'backpack', 'car')",
+  "quick_actions": ["Option 1", "Option 2", "Option 3", "Option 4"],
+  "active_filters": {"color": "blue", "brand": "Nike"}
+}
+
+Guidelines:
+- Welcome users warmly and be conversational
+- Use search_products tool to find products
+- Set product_category_decided=true when user shows clear intent for a category
+- Available categories: car, backpack
+- When analyzing images, immediately identify the product and search for similar items
+"""
 
 # Tool definitions for Anthropic API
 TOOLS = [
@@ -144,6 +162,82 @@ async def root():
             "product_by_id": "Get detailed product information by ID"
         }
     }
+
+
+# Quick image analysis to extract product name
+async def extract_product_name_from_image(image_base64: str) -> dict:
+    """
+    Quick vision call to extract JUST the product name and category.
+    Uses response_format to ensure clean JSON output.
+
+    Args:
+        image_base64: Base64 encoded image data
+
+    Returns:
+        Dictionary with product_name and category
+    """
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    try:
+        vision_response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=200,
+            response_format={"type": "json_object"},  # Force JSON output
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_base64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": """Analyze this product image and return ONLY a JSON object with these fields:
+{
+  "product_name": "descriptive name of the product (e.g., 'Blue Hiking Backpack', 'Red Sports Car')",
+  "category": "product category - MUST be either 'car' or 'backpack' or 'other'",
+  "color": "primary color",
+  "description": "brief 1-sentence description"
+}
+
+If this is not a recognizable product, return:
+{
+  "product_name": "Unknown Product",
+  "category": "other",
+  "color": "",
+  "description": "Unable to identify product"
+}"""
+                    }
+                ]
+            }]
+        )
+
+        # Parse the JSON response
+        response_text = vision_response.content[0].text
+        print(f"📸 Quick Vision Analysis: {response_text}")
+
+        result = json.loads(response_text)
+        return {
+            "product_name": result.get("product_name", "Unknown Product"),
+            "category": result.get("category", "other"),
+            "color": result.get("color", ""),
+            "description": result.get("description", "")
+        }
+
+    except Exception as e:
+        print(f"❌ Vision API error: {e}")
+        return {
+            "product_name": "Unknown Product",
+            "category": "other",
+            "color": "",
+            "description": f"Error analyzing image: {str(e)}"
+        }
 
 
 # Image-based product search helper
@@ -658,7 +752,8 @@ async def _process_anthropic_chat(
     model: str,
     max_tokens: int,
     stream: bool,
-    system: Optional[str] = None
+    system: Optional[str] = None,
+    extracted_product_info: Optional[dict] = None
 ):
     """
     Internal helper to process Anthropic chat requests with tool calling support
@@ -666,6 +761,7 @@ async def _process_anthropic_chat(
 
     Args:
         messages: List of message dicts with 'role' and 'content' keys
+        extracted_product_info: Optional product info from image analysis (for immediate frontend display)
     """
     from fastapi.responses import JSONResponse
 
@@ -681,8 +777,9 @@ async def _process_anthropic_chat(
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
-            "tools": TOOLS,  # Add tool definitions
-            "response_format": {"type": "json_object"}  # Force valid JSON output only
+            "tools": TOOLS  # Add tool definitions
+            # NOTE: response_format removed to avoid conflict with tool use
+            # Will add it only for final response after tools are done
         }
 
         # Add system message if provided
@@ -748,6 +845,11 @@ async def _process_anthropic_chat(
                     "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') else None
                 } if hasattr(response, 'usage') else None
             }
+
+            # Add extracted product info if available (for immediate frontend display)
+            if extracted_product_info:
+                response_data["extracted_product"] = extracted_product_info
+
             return JSONResponse(content=response_data)
 
         # Streaming mode with tools
@@ -952,7 +1054,7 @@ async def anthropic_chat_stream(
     message: str = Form(...),
     conversation_history: Optional[str] = Form(None),
     system: Optional[str] = Form(None),
-    system_prompt: Optional[str] = Form(None),
+    system_prompt: Optional[str] = Form(DEFAULT_SYSTEM_PROMPT),
     image: Optional[UploadFile] = File(None),
     image_media_type: Optional[str] = Form("image/jpeg"),
     model: Optional[str] = Form("claude-3-5-haiku-latest"),
@@ -1007,41 +1109,27 @@ async def anthropic_chat_stream(
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid conversation_history JSON format")
 
-        # Process image input for current message
-        img_base64 = None
-        image_search_results = None
+        # TWO-STEP IMAGE FLOW: Extract product name first, then search
+        extracted_product_info = None
 
         if image:
-            # File upload
+            # Step 1: Quick image analysis to get product name (with response_format, no tools)
             image_data = await image.read()
             img_base64 = base64.b64encode(image_data).decode('utf-8')
-            image_media_type = image.content_type or image_media_type
 
-            # IMPORTANT: Perform image-based product search
-            print("🔍 Performing image-based product search...")
-            image_search_results = await analyze_image_and_find_products(img_base64, message)
-            print(f"✅ Found {image_search_results.get('count', 0)} products matching image")
+            print("🔍 Step 1: Extracting product name from image...")
+            extracted_product_info = await extract_product_name_from_image(img_base64)
+            product_name = extracted_product_info.get("product_name")
+            category = extracted_product_info.get("category")
 
-        # Prepare current message content
-        if img_base64:
-            # Include both image and text
-            current_content = [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": image_media_type,
-                        "data": img_base64
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": message
-                }
-            ]
-        else:
-            # Text only
-            current_content = message
+            print(f"✅ Extracted: {product_name} (category: {category})")
+
+            # Step 2: Replace user message with text search query (NO image sent to main AI)
+            message = f"Search for products similar to: {product_name}"
+            print(f"🔄 Step 2: Searching with query: {message}")
+
+        # Prepare current message content (always text-only now)
+        current_content = message
 
         # Add current user message
         messages.append({
@@ -1052,37 +1140,25 @@ async def anthropic_chat_stream(
         # Use system_prompt if provided, otherwise use default
         final_system_prompt = system_prompt or system or DEFAULT_SYSTEM_PROMPT
 
-        # If image search found products, add context to system prompt
-        if image_search_results and image_search_results.get('products'):
-            products = image_search_results['products']
-            category = image_search_results.get('category', 'products')
-            color = image_search_results.get('color', '')
+        # If image was analyzed, add context about what we found
+        if extracted_product_info and extracted_product_info.get("category") != "other":
+            image_context = f"""
 
-            product_context = f"""
+IMAGE UPLOAD CONTEXT:
+The user uploaded an image of a product: {extracted_product_info.get('product_name')}
+Category: {extracted_product_info.get('category')}
+Color: {extracted_product_info.get('color', 'N/A')}
+Description: {extracted_product_info.get('description', 'N/A')}
 
-IMAGE ANALYSIS RESULTS:
-The user uploaded an image of a {color + ' ' if color else ''}{category}.
-I found {len(products)} matching products in our catalog:
-
+Use the search_products tool to find similar products in this category.
 """
-            for i, p in enumerate(products[:5], 1):
-                product_context += f"{i}. {p['name']} by {p['brand']} - ${p['price']}"
-                if p.get('color'):
-                    product_context += f" ({p['color']})"
-                product_context += "\n"
-
-            if len(products) > 5:
-                product_context += f"\n...and {len(products) - 5} more similar products.\n"
-
-            product_context += """
-IMPORTANT: The user can see these products in the side panel. Reference them by name in your response.
-Recommend specific products from this list and mention their prices.
-"""
-
-            final_system_prompt = (final_system_prompt or "") + product_context
+            final_system_prompt = (final_system_prompt or "") + image_context
 
         # Process request using helper function (hardcoded to non-streaming mode)
-        return await _process_anthropic_chat(client, messages, model, max_tokens, False, final_system_prompt)
+        return await _process_anthropic_chat(
+            client, messages, model, max_tokens, False, final_system_prompt,
+            extracted_product_info  # Pass product info to return in response
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
