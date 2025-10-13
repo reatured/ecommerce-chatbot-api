@@ -239,7 +239,7 @@ async def initialize_app():
     This endpoint:
     1. Activates the backend (useful for Render free tier cold starts)
     2. Fetches and caches product data
-    3. Returns available categories for quick action buttons
+    3. Returns available categories for quick action buttons (sorted by product count)
     4. Provides metadata for stage 0 product recommendations
 
     Returns:
@@ -260,8 +260,15 @@ async def initialize_app():
         # Fetch products (this will populate cache and wake up backend)
         products = fetch_products_from_sheet(use_cache=False)
 
-        # Extract unique categories
-        categories = get_unique_categories(products)
+        # Count products per category
+        category_counts = {}
+        for product in products:
+            category = product.get('category', '').strip().lower()
+            if category:
+                category_counts[category] = category_counts.get(category, 0) + 1
+
+        # Sort categories by product count (descending)
+        categories = sorted(category_counts.keys(), key=lambda cat: category_counts[cat], reverse=True)
 
         # Extract unique colors
         colors = get_unique_colors(products)
