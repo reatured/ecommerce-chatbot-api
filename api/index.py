@@ -114,9 +114,20 @@ async def anthropic_chat_stream(
 
     # Handle image (optional)
     # Check if image is actually an UploadFile and has content
-    if image and isinstance(image, UploadFile) and image.filename:
+    print(f"🖼️  IMAGE DEBUG:")
+    print(f"   - image exists: {image is not None}")
+    print(f"   - image type: {type(image)}")
+    print(f"   - isinstance UploadFile: {isinstance(image, UploadFile) if image else 'N/A'}")
+    if image:
+        print(f"   - image.filename: {getattr(image, 'filename', 'NO ATTR')}")
+        print(f"   - image.content_type: {getattr(image, 'content_type', 'NO ATTR')}")
+
+    if image:
+        print("   ✅ Entering image processing block")
         img_data = await image.read()
+        print(f"   - img_data length: {len(img_data) if img_data else 0} bytes")
         if img_data:  # Only process if there's actual data
+            print("   ✅ img_data has content, encoding to base64...")
             img_b64 = base64.b64encode(img_data).decode("utf-8")
             content = [
                 {"type": "image", "source": {
@@ -126,9 +137,12 @@ async def anthropic_chat_stream(
                 }},
                 {"type": "text", "text": message}
             ]
+            print("   ✅ Created multipart content with image")
         else:
+            print("   ❌ img_data is empty, falling back to text-only")
             content = message
     else:
+        print("   ❌ Image check failed, using text-only content")
         content = message
 
     messages.append({"role": "user", "content": content})
