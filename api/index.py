@@ -63,12 +63,12 @@ async def root():
 @app.post("/api/chat/anthropic/stream")
 async def anthropic_chat_stream(
     message: str = Form("Hello, what can you do?"),
-    system_prompt: str | None = Form(None),
+    image: UploadFile | None = File(None),
     request: Request = None
 ):
     """🚀 Simple Claude Chat Endpoint (No safety checks, for testing)
-    - Supports optional `system` or `system_prompt`
-    - Accepts text or optional image
+    - Accepts text message and optional image
+    - Frontend combines system prompt with message before sending
     - Returns direct text response from Claude
     """
     # Parse multipart form data manually to handle all fields including empty image
@@ -76,7 +76,6 @@ async def anthropic_chat_stream(
 
     # Extract remaining form fields with defaults
     conversation_history = form.get("conversation_history", '[{"role": "assistant", "content": "Hi there! I am your shopping assistant."}]')
-    system = form.get("system", "You are a friendly e-commerce chatbot that helps users find products.")
     image_media_type = form.get("image_media_type", "image/jpeg")
     model = form.get("model", "claude-3-5-haiku-latest")
 
@@ -86,11 +85,7 @@ async def anthropic_chat_stream(
     except (ValueError, TypeError):
         max_tokens = 512
 
-    # Handle image field - convert empty string to None
-    image_field = form.get("image")
-    image = None
-    if image_field and isinstance(image_field, UploadFile) and image_field.filename:
-        image = image_field
+    # Image is now passed as a function parameter, no need to extract from form
 
     # 📨 LOG INCOMING REQUEST
     print("\n" + "🔷"*35)
@@ -138,16 +133,12 @@ async def anthropic_chat_stream(
 
     messages.append({"role": "user", "content": content})
 
-    # Combine system + system_prompt
-    system_msg = system_prompt or system or ""
-
     # 📤 LOG REQUEST TO CLAUDE
     print("\n" + "="*70)
     print("📤 SENDING TO CLAUDE")
     print("="*70)
     print(f"Model: {model}")
     print(f"Max Tokens: {max_tokens}")
-    print(f"System Prompt: {system_msg[:200]}..." if len(system_msg) > 200 else f"System Prompt: {system_msg}")
     print(f"\nMessages ({len(messages)} total):")
     for i, msg in enumerate(messages):
         role = msg.get("role", "unknown")
@@ -171,7 +162,6 @@ async def anthropic_chat_stream(
         resp = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=system_msg,
             messages=messages
         )
 
