@@ -176,11 +176,26 @@ async def anthropic_chat_stream(
 
     # Get Claude response with tool use support
     try:
+        # System instruction for tool use
+        system_instruction = """You are a helpful shopping assistant with access to a product database.
+
+CRITICAL RULES FOR TOOL USE:
+1. ALWAYS use search_products or filter_products tools IMMEDIATELY when user mentions:
+   - Any brand name (e.g., "BMW", "Nike", "Sony")
+   - Any product type (e.g., "sedan", "backpack", "laptop")
+   - Any category or color
+2. NEVER suggest or mention specific product models without first checking the database
+3. ONLY present products that exist in the tool results - do not make up or suggest products
+4. When presenting products, include ALL product details returned by the tool (name, price, color, description, etc.)
+
+When you receive product data from tools, present it naturally and include all the product information so users can see details."""
+
         # Initial request with tools
         resp = client.messages.create(
             model=model,
             max_tokens=max_tokens,
             messages=messages,
+            system=system_instruction,
             tools=get_all_tools()  # Add tool definitions
         )
 
@@ -242,6 +257,7 @@ async def anthropic_chat_stream(
                 model=model,
                 max_tokens=max_tokens,
                 messages=messages,
+                system=system_instruction,
                 tools=get_all_tools()
             )
 
@@ -261,7 +277,38 @@ async def anthropic_chat_stream(
         print(reply_text)
         print("="*70 + "\n")
 
-        return {"reply": reply_text}
+        # Extract product data from tool results if any
+        products_mentioned = []
+        for msg in messages:
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check for tool results
+                for content_block in msg.get("content", []):
+                    if content_block.get("type") == "tool_result":
+                        try:
+                            result_data = json.loads(content_block.get("content", "{}"))
+                            # Check if result contains product data
+                            if result_data.get("success") and "products" in result_data:
+                                products_mentioned.extend(result_data["products"])
+                            elif result_data.get("success") and "product" in result_data:
+                                products_mentioned.append(result_data["product"])
+                        except:
+                            pass
+
+        # Return response with optional product data
+        response = {"reply": reply_text}
+        if products_mentioned:
+            # Deduplicate products by ID
+            seen_ids = set()
+            unique_products = []
+            for product in products_mentioned:
+                product_id = product.get("id")
+                if product_id not in seen_ids:
+                    seen_ids.add(product_id)
+                    unique_products.append(product)
+            response["products"] = unique_products
+            print(f"📦 Including {len(unique_products)} products in response\n")
+
+        return response
     except Exception as e:
         print(f"\n❌ ERROR: {str(e)}\n")
         raise HTTPException(status_code=500, detail=str(e))
