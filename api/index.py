@@ -48,6 +48,9 @@ app.add_middleware(
 from api.products import router as products_router
 app.include_router(products_router)
 
+# Import tool use functions
+from api.tools import get_all_tools, execute_tool
+
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
@@ -171,23 +174,90 @@ async def anthropic_chat_stream(
                     print(f"       - image: base64 data ({len(part.get('source', {}).get('data', ''))} chars)")
     print("="*70 + "\n")
 
-    # Get Claude response
+    # Get Claude response with tool use support
     try:
+        # Initial request with tools
         resp = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            messages=messages
+            messages=messages,
+            tools=get_all_tools()  # Add tool definitions
         )
 
         # 📥 LOG RESPONSE FROM CLAUDE
-        reply_text = resp.content[0].text
         print("\n" + "="*70)
         print("📥 RECEIVED FROM CLAUDE")
         print("="*70)
         print(f"Model: {resp.model}")
         print(f"Stop Reason: {resp.stop_reason}")
         print(f"Usage: {resp.usage.input_tokens} input tokens, {resp.usage.output_tokens} output tokens")
-        print(f"\nResponse ({len(reply_text)} chars):")
+        print("="*70 + "\n")
+
+        # Tool Use Loop - handle tool calls from Claude
+        while resp.stop_reason == "tool_use":
+            print("\n" + "🔧"*35)
+            print("🔧 TOOL USE DETECTED")
+            print("🔧"*35)
+
+            # Extract tool use blocks
+            tool_use_blocks = [block for block in resp.content if block.type == "tool_use"]
+
+            # Add assistant's response to conversation
+            messages.append({
+                "role": "assistant",
+                "content": resp.content
+            })
+
+            # Execute each tool and collect results
+            tool_results = []
+            for tool_block in tool_use_blocks:
+                tool_name = tool_block.name
+                tool_input = tool_block.input
+                tool_use_id = tool_block.id
+
+                print(f"\n🔧 Executing tool: {tool_name}")
+                print(f"   Input: {tool_input}")
+
+                # Execute the tool
+                result = execute_tool(tool_name, tool_input)
+
+                print(f"   Result: {result}")
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": json.dumps(result)
+                })
+
+            # Add tool results to conversation
+            messages.append({
+                "role": "user",
+                "content": tool_results
+            })
+
+            print("🔧"*35 + "\n")
+
+            # Continue conversation with tool results
+            resp = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=messages,
+                tools=get_all_tools()
+            )
+
+            print("\n" + "="*70)
+            print("📥 RECEIVED FROM CLAUDE (after tool use)")
+            print("="*70)
+            print(f"Stop Reason: {resp.stop_reason}")
+            print("="*70 + "\n")
+
+        # Extract final text response
+        reply_text = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                reply_text += block.text
+
+        print(f"\n✅ Final Response ({len(reply_text)} chars):")
         print(reply_text)
         print("="*70 + "\n")
 
