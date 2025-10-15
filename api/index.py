@@ -73,6 +73,7 @@ async def anthropic_chat_stream(
     - Accepts text message and optional image
     - Frontend combines system prompt with message before sending
     - Returns direct text response from Claude
+    - Supports active_filters parameter for automatic product filtering
     """
     # Parse multipart form data manually to handle all fields including empty image
     form = await request.form()
@@ -81,6 +82,7 @@ async def anthropic_chat_stream(
     conversation_history = form.get("conversation_history", '[{"role": "assistant", "content": "Hi there! I am your shopping assistant."}]')
     image_media_type = form.get("image_media_type", "image/jpeg")
     model = form.get("model", "claude-3-5-haiku-latest")
+    active_filters = form.get("active_filters", "{}")  # JSON object with filters
 
     # Handle max_tokens - convert to int
     try:
@@ -148,6 +150,27 @@ async def anthropic_chat_stream(
         print("   ❌ Image check failed, using text-only content")
         content = message
 
+    # Handle active filters - inject filter information into message
+    filters_applied = {}
+    try:
+        filters_applied = json.loads(active_filters) if active_filters != "{}" else {}
+    except:
+        pass
+
+    # If filters are active, prepend filter info to the message
+    if filters_applied and isinstance(content, str):
+        filter_parts = []
+        if "brand" in filters_applied and filters_applied["brand"]:
+            filter_parts.append(f"brand: {filters_applied['brand']}")
+        if "category" in filters_applied and filters_applied["category"]:
+            filter_parts.append(f"category: {filters_applied['category']}")
+        if "color" in filters_applied and filters_applied["color"]:
+            filter_parts.append(f"color: {filters_applied['color']}")
+
+        if filter_parts:
+            filter_instruction = f"[Active filters: {', '.join(filter_parts)}. User message: "
+            content = filter_instruction + content + "]"
+
     messages.append({"role": "user", "content": content})
 
     # 📤 LOG REQUEST TO CLAUDE
@@ -184,9 +207,13 @@ CRITICAL RULES FOR TOOL USE:
    - Any brand name (e.g., "BMW", "Nike", "Sony")
    - Any product type (e.g., "sedan", "backpack", "laptop")
    - Any category or color
+   - When user applies filters or changes filters (MUST search again with new filters)
 2. NEVER suggest or mention specific product models without first checking the database
 3. ONLY present products that exist in the tool results - do not make up or suggest products
 4. When presenting products, include ALL product details returned by the tool (name, price, color, description, etc.)
+5. If user adds or changes filters (brand, color, category, etc.), you MUST immediately search the database again with the updated filters
+
+IMPORTANT: When filters change, old product results are NO LONGER VALID. You must search again to get fresh results that match the current filters.
 
 When you receive product data from tools, present it naturally and include all the product information so users can see details."""
 
